@@ -1,0 +1,29 @@
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:latest
+    container_name: ib-gateway
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "4002:4004"
+      - "5900:5900"
+    environment:
+      - TWS_USERID=${TWS_USERID}
+      - TWS_PASSWORD=${TWS_PASSWORD}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - TWS_ACCEPT_EULA=${TWS_ACCEPT_EULA:-yes}
+      - VNC_SERVER_PASSWORD=${VNC_PASSWORD:-ibgateway}
+      - API_PORT=4002
+      - SOCAT_PORT=4004
+      - IBC_INI=/home/ibgateway/ibc/config.ini
+      - IBC_PATH=/home/ibgateway/ibc
+      - TWS_PATH=/home/ibgateway/Jts
+      - LOG_PATH=/home/ibgateway/logs
+    volumes:
+      - ./ibc/config.ini.tmpl:/home/ibgateway/ibc/config.ini.tmpl
+      - ./ibc/config.ini:/home/ibgateway/ibc/config.ini
+      - ./logs:/home/ibgateway/logs
+
+  # The ib-proxy service will be added here in Phase 4
+  # or we can run it locally on the host.
