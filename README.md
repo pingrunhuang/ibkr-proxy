@@ -57,10 +57,10 @@ uv run src/consumer_example.py
 ```
 
 ## ZeroMQ Topics
-- `marketdata.<symbol>`: Streaming tick data.
-  - Stocks: `marketdata.AAPL`
-  - Forex: `marketdata.USDCNH`
-  - Crypto: `marketdata.BTC`
+- `marketdata.<secType>.<symbol>.<currency>.<exchange>`: Streaming tick data.
+  - Stocks: `marketdata.STK.AAPL.USD.SMART`
+  - Forex: `marketdata.CASH.USD.CNH.IDEALPRO`
+  - Crypto: `marketdata.CRYPTO.BTC.USD.PAXOS`
 - `account.<account_id>`: Account balance and margin.
 - `portfolio.<account_id>`: Position updates.
 - `executions.<account_id>`: Order fills and trade details.

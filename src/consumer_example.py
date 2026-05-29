@@ -1,10 +1,6 @@
 import zmq
 import json
-import logging
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 def main():
     context = zmq.Context()

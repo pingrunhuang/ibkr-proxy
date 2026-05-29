@@ -1,11 +1,9 @@
 import asyncio
 import json
-import logging
 import zmq
 import zmq.asyncio
+from loguru import logger
 from ib_async import IB, util
-
-logger = logging.getLogger(__name__)
 
 class IBProxy:
     def __init__(self, ib_host='127.0.0.1', ib_port=4001, client_id=1, zmq_port=5555):
@@ -48,10 +46,12 @@ class IBProxy:
 
     def on_pending_tickers(self, tickers):
         for t in tickers:
-            topic = f"marketdata.{t.contract.symbol}"
+            topic = f"marketdata.{t.contract.secType}.{t.contract.symbol}.{t.contract.currency}.{t.contract.exchange}"
             data = {
                 'symbol': t.contract.symbol,
                 'currency': t.contract.currency,
+                'secType': t.contract.secType,
+                'exchange': t.contract.exchange,
                 'bid': t.bid,
                 'bidSize': t.bidSize,
                 'ask': t.ask,
@@ -121,6 +121,10 @@ class IBProxy:
         """Publish data to ZeroMQ."""
         message = json.dumps(data, default=str)
         await self.pub_socket.send_string(f"{topic} {message}")
+        logger.debug(f"Published to topic {topic}: {message}")
+        # Using debug to avoid flooding the console, but info could be used if preferred.
+        # Given the user's request, I will use info for visibility.
+        logger.info(f"Successfully published to ZMQ: {topic}")
 
     async def run_forever(self):
         """Main loop to keep the proxy alive and handle reconnections."""
