@@ -5,7 +5,7 @@ import logging
 import sys
 from dotenv import load_dotenv
 from loguru import logger
-from ib_async import Stock, Forex, Crypto
+from ib_async import Stock, Forex, Crypto, Future, MarketOrder, LimitOrder
 from proxy import IBProxy
 
 # Intercept standard logging
@@ -36,6 +36,7 @@ async def main():
     parser.add_argument('--ib-port', type=int, default=int(os.getenv('IB_API_PORT', 4002)), help='IB Gateway port')
     parser.add_argument('--client-id', type=int, default=int(os.getenv('IB_CLIENT_ID', 1)), help='IB API client ID')
     parser.add_argument('--zmq-port', type=int, default=int(os.getenv('ZMQ_PUB_PORT', 5555)), help='ZeroMQ PUB port')
+    parser.add_argument('--zmq-rep-port', type=int, default=int(os.getenv('ZMQ_REP_PORT', 5556)), help='ZeroMQ REP port for commands')
     parser.add_argument('--symbols', default=os.getenv('IB_SYMBOLS', 'AAPL,TSLA,SPY'), help='Comma-separated symbols to subscribe to')
     
     args = parser.parse_args()
@@ -44,7 +45,8 @@ async def main():
         ib_host=args.ib_host,
         ib_port=args.ib_port,
         client_id=args.client_id,
-        zmq_port=args.zmq_port
+        zmq_port=args.zmq_port,
+        zmq_rep_port=args.zmq_rep_port
     )
     
     try:
@@ -60,6 +62,13 @@ async def main():
             elif s.startswith('CRYPTO:'):
                 coin = s[7:]
                 contracts.append(Crypto(coin, 'PAXOS', 'USD'))
+            elif s.startswith('FUT:'):
+                # Format: FUT:SYMBOL:YYYYMM:EXCHANGE
+                parts = s.split(':')
+                if len(parts) == 4:
+                    contracts.append(Future(parts[1], parts[2], parts[3]))
+                else:
+                    logger.warning(f"Invalid Futures format: {s}. Expected FUT:SYMBOL:YYYYMM:EXCHANGE")
             else:
                 contracts.append(Stock(s, 'SMART', 'USD'))
         
