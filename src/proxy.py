@@ -3,7 +3,7 @@ import json
 import zmq
 import zmq.asyncio
 from loguru import logger
-from ib_async import IB, util
+from ib_async import IB, util, Event
 
 class IBProxy:
     def __init__(self, ib_host='127.0.0.1', ib_port=4001, client_id=1, zmq_port=5555):
@@ -13,11 +13,23 @@ class IBProxy:
         self.zmq_port = zmq_port
         
         self.ib = IB()
+        # Manually add missing events from ib_async
+        self.ib.positionEndEvent = Event('positionEndEvent')
+        self._patch_ib_wrapper()
+
         self.context = zmq.asyncio.Context()
         self.pub_socket = self.context.socket(zmq.PUB)
         
         # Internal state
         self._is_running = False
+
+    def _patch_ib_wrapper(self):
+        """Patch the IB wrapper to emit custom events for sync completion."""
+        orig_position_end = self.ib.wrapper.positionEnd
+        def position_end_hook():
+            orig_position_end()
+            self.ib.positionEndEvent.emit()
+        self.ib.wrapper.positionEnd = position_end_hook
 
     async def connect(self):
         """Connect to IB Gateway and bind ZeroMQ socket."""
@@ -40,9 +52,16 @@ class IBProxy:
         self.ib.pendingTickersEvent += self.on_pending_tickers
         self.ib.accountValueEvent += self.on_account_value
         self.ib.positionEvent += self.on_position
+        self.ib.positionEndEvent += self.on_position_end
         self.ib.execDetailsEvent += self.on_exec_details
         self.ib.pnlEvent += self.on_pnl
         logger.info("Event handlers configured.")
+
+    def on_position_end(self):
+        """当 IBKR 报告当前账户持仓快照推送完毕时触发"""
+        topic = "portfolio_sync_done.all"
+        data = {"status": "completed"}
+        asyncio.create_task(self.publish(topic, data))
 
     def on_pending_tickers(self, tickers):
         for t in tickers:

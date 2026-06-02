@@ -23,6 +23,11 @@ class InterceptHandler(logging.Handler):
 
 logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
+# Configure loguru
+logger.remove()  # Remove default handler
+logger.add(sys.stderr, level="INFO")  # Add back console logging
+logger.add("logs/ibkr_proxy.log", rotation="4 hours", level="INFO", enqueue=True)
+
 async def main():
     load_dotenv()
     
