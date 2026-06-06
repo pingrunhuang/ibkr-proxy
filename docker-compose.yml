@@ -14,6 +14,7 @@ services:
       - TRADING_MODE=${TRADING_MODE:-paper}
       - TWS_ACCEPT_EULA=${TWS_ACCEPT_EULA:-yes}
       - VNC_SERVER_PASSWORD=${VNC_PASSWORD:-ibgateway}
+      - READ_ONLY_API=${READ_ONLY_API:-no}
       - API_PORT=4002
       - SOCAT_PORT=4004
       - IBC_INI=/home/ibgateway/ibc/config.ini
