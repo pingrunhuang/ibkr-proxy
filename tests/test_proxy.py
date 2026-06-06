@@ -15,6 +15,8 @@ class FakeContract:
         self.lastTradeDateOrContractMonth = lastTradeDateOrContractMonth
         self.conId = 0
         self.localSymbol = ""
+        self.multiplier = ""
+        self.tradingClass = ""
 
 
 class FakeStock(FakeContract):
@@ -23,8 +25,19 @@ class FakeStock(FakeContract):
 
 
 class FakeFuture(FakeContract):
-    def __init__(self, symbol, expiry, exchange, currency="USD"):
-        super().__init__(symbol, exchange, currency, "FUT", expiry)
+    def __init__(
+        self,
+        symbol="",
+        lastTradeDateOrContractMonth="",
+        exchange="",
+        localSymbol="",
+        multiplier="",
+        currency="",
+        **kwargs,
+    ):
+        super().__init__(symbol, exchange, currency, "FUT", lastTradeDateOrContractMonth)
+        self.localSymbol = localSymbol
+        self.multiplier = multiplier
 
 
 class FakeForex(FakeContract):
@@ -126,6 +139,7 @@ def test_contract_from_symbol_supports_plain_and_dotted_formats(proxy):
     assert future.currency == "USD"
     assert future.exchange == "CME"
     assert future.lastTradeDateOrContractMonth == "202609"
+    assert future.localSymbol == ""
 
     crypto = proxy._contract_from_symbol("CRYPTO.BTC.USD.PAXOS")
     assert crypto.secType == "CRYPTO"
@@ -150,6 +164,24 @@ def test_contract_from_symbol_supports_startup_and_legacy_formats(proxy):
     assert legacy_future.symbol == "ES"
     assert legacy_future.exchange == "CME"
     assert legacy_future.lastTradeDateOrContractMonth == "202609"
+
+
+def test_contract_from_symbol_supports_future_disambiguators(proxy):
+    standard_silver = proxy._contract_from_symbol("FUT:SI:202608:COMEX:5000:SI")
+    assert standard_silver.secType == "FUT"
+    assert standard_silver.symbol == "SI"
+    assert standard_silver.exchange == "COMEX"
+    assert standard_silver.lastTradeDateOrContractMonth == "202608"
+    assert standard_silver.multiplier == "5000"
+    assert standard_silver.tradingClass == "SI"
+    assert standard_silver.currency == "USD"
+    assert standard_silver.localSymbol == ""
+
+    mini_silver = proxy._contract_from_symbol("FUT.SI.USD.COMEX.202608.multiplier=1000.tradingClass=SIL")
+    assert mini_silver.secType == "FUT"
+    assert mini_silver.currency == "USD"
+    assert mini_silver.multiplier == "1000"
+    assert mini_silver.tradingClass == "SIL"
 
 
 def test_order_update_data_normalizes_trade(proxy):

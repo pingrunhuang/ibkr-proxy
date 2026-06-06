@@ -89,6 +89,8 @@ Send JSON requests to `tcp://<host>:5556`:
 - `{"action": "get_positions"}`
 - `{"action": "get_orders"}`
 - `{"action": "subscribe_market_data", "symbols": ["CASH.USD.CNH.IDEALPRO"]}`
+- `{"action": "subscribe_market_data", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
+- `{"action": "subscribe_market_data", "contracts": [{"sec_type": "FUT", "symbol": "SI", "exchange": "COMEX", "currency": "USD", "expiry": "202608", "multiplier": "5000", "trading_class": "SI"}]}`
 - `{"action": "place_order", "sec_type": "STK", "symbol": "AAPL", "exchange": "SMART", "currency": "USD", "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 100.0}`
 - `{"action": "cancel_order", "order_id": 123}`
 
@@ -101,6 +103,10 @@ Supported symbol formats for `subscribe_market_data` include:
 - `CRYPTO:BTC`
 - `FUT:ES:202609:CME`
 - `ES:202609:CME`
+- `FUT:SI:202608:COMEX:5000:SI`
+- `FUT.SI.USD.COMEX.202608.multiplier=1000.tradingClass=SIL`
+
+Some futures share the same symbol, month, and exchange. COMEX silver is one example: `SI` can resolve to standard silver (`multiplier=5000`, `tradingClass=SI`) or mini silver (`multiplier=1000`, `tradingClass=SIL`). Use an explicit multiplier or trading class when IBKR reports an ambiguous contract.
 
 ## Tests
 Proxy-side unit tests mock IBKR objects and do not require a live IB Gateway:

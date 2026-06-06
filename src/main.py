@@ -5,7 +5,6 @@ import logging
 import sys
 from dotenv import load_dotenv
 from loguru import logger
-from ib_async import Stock, Forex, Crypto, Future, MarketOrder, LimitOrder
 from proxy import IBProxy
 
 # Intercept standard logging
@@ -52,25 +51,9 @@ async def main():
     try:
         await proxy.connect()
         
-        # Subscribe to market data for symbols
-        symbols = [s.strip() for s in args.symbols.split(',')]
-        contracts = []
-        for s in symbols:
-            if s.startswith('FX:'):
-                pair = s[3:]
-                contracts.append(Forex(pair))
-            elif s.startswith('CRYPTO:'):
-                coin = s[7:]
-                contracts.append(Crypto(coin, 'PAXOS', 'USD'))
-            elif s.startswith('FUT:'):
-                # Format: FUT:SYMBOL:YYYYMM:EXCHANGE
-                parts = s.split(':')
-                if len(parts) == 4:
-                    contracts.append(Future(parts[1], parts[2], parts[3]))
-                else:
-                    logger.warning(f"Invalid Futures format: {s}. Expected FUT:SYMBOL:YYYYMM:EXCHANGE")
-            else:
-                contracts.append(Stock(s, 'SMART', 'USD'))
+        # Subscribe to market data for symbols.
+        symbols = [s.strip() for s in args.symbols.split(',') if s.strip()]
+        contracts = [proxy._contract_from_symbol(s) for s in symbols]
         
         # Qualify contracts (resolves conId, exchange, etc.)
         qualified_contracts = await proxy.ib.qualifyContractsAsync(*contracts)

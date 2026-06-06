@@ -111,7 +111,9 @@ class IBProxy:
             'exchange': getattr(contract, 'exchange', ''),
             'conId': getattr(contract, 'conId', 0),
             'localSymbol': getattr(contract, 'localSymbol', ''),
-            'lastTradeDateOrContractMonth': getattr(contract, 'lastTradeDateOrContractMonth', '')
+            'lastTradeDateOrContractMonth': getattr(contract, 'lastTradeDateOrContractMonth', ''),
+            'multiplier': getattr(contract, 'multiplier', ''),
+            'tradingClass': getattr(contract, 'tradingClass', '')
         }
 
     def _order_update_data(self, trade):
@@ -185,6 +187,22 @@ class IBProxy:
             logger.info(f"Subscribing to market data for {contract.symbol}...")
             self.ib.reqMktData(contract)
 
+    def _apply_contract_overrides(self, contract, values):
+        for attr, key in (
+            ('conId', 'con_id'),
+            ('multiplier', 'multiplier'),
+            ('tradingClass', 'trading_class'),
+            ('localSymbol', 'local_symbol'),
+        ):
+            value = values.get(key)
+            if value in (None, ''):
+                value = values.get(attr)
+            if value not in (None, ''):
+                if attr == 'conId':
+                    value = int(value)
+                setattr(contract, attr, value)
+        return contract
+
     def _contract_from_request(self, req):
         contract_type = req.get('sec_type', 'STK')
         symbol = req.get('symbol')
@@ -194,12 +212,43 @@ class IBProxy:
         if contract_type == 'STK':
             return Stock(symbol, exchange, currency)
         if contract_type == 'FUT':
-            return Future(symbol, req.get('expiry'), exchange, currency)
+            contract = Future(
+                symbol=symbol,
+                lastTradeDateOrContractMonth=req.get('expiry'),
+                exchange=exchange,
+                currency=currency,
+            )
+            return self._apply_contract_overrides(contract, req)
         if contract_type == 'CASH':
             return Forex(symbol, exchange)
         if contract_type == 'CRYPTO':
             return Crypto(symbol, exchange, currency)
         return None
+
+    def _parse_optional_contract_values(self, values):
+        parsed = {}
+        positional = []
+        for value in values:
+            if '=' in value:
+                key, raw_value = value.split('=', 1)
+                key = key.strip()
+                if key == 'tradingClass':
+                    key = 'trading_class'
+                elif key == 'localSymbol':
+                    key = 'local_symbol'
+                elif key == 'conId':
+                    key = 'con_id'
+                parsed[key] = raw_value.strip()
+            else:
+                positional.append(value)
+
+        if positional:
+            parsed['multiplier'] = positional[0]
+        if len(positional) > 1:
+            parsed['trading_class'] = positional[1]
+        if len(positional) > 2:
+            parsed['local_symbol'] = positional[2]
+        return parsed
 
     def _contract_from_symbol(self, symbol):
         parts = symbol.split('.')
@@ -215,7 +264,7 @@ class IBProxy:
                 return self._contract_from_request(req)
             if sec_type == 'CASH' and len(parts) == 4:
                 return Forex(f"{parts[1]}{parts[2]}", parts[3])
-            if sec_type == 'FUT' and len(parts) == 5:
+            if sec_type == 'FUT' and len(parts) >= 5:
                 req = {
                     'sec_type': 'FUT',
                     'symbol': parts[1],
@@ -223,6 +272,7 @@ class IBProxy:
                     'exchange': parts[3],
                     'expiry': parts[4]
                 }
+                req.update(self._parse_optional_contract_values(parts[5:]))
                 return self._contract_from_request(req)
 
         if symbol.startswith('FX:'):
@@ -231,13 +281,29 @@ class IBProxy:
             return Crypto(symbol[7:], 'PAXOS', 'USD')
         if symbol.startswith('FUT:'):
             fut_parts = symbol.split(':')
-            if len(fut_parts) == 4:
-                return Future(fut_parts[1], fut_parts[2], fut_parts[3])
-            raise ValueError(f"Invalid futures format: {symbol}. Expected FUT:SYMBOL:YYYYMM:EXCHANGE")
+            if len(fut_parts) >= 4:
+                req = {
+                    'sec_type': 'FUT',
+                    'symbol': fut_parts[1],
+                    'expiry': fut_parts[2],
+                    'exchange': fut_parts[3],
+                    'currency': 'USD',
+                }
+                req.update(self._parse_optional_contract_values(fut_parts[4:]))
+                return self._contract_from_request(req)
+            raise ValueError(f"Invalid futures format: {symbol}. Expected FUT:SYMBOL:YYYYMM:EXCHANGE[:MULTIPLIER[:TRADING_CLASS]]")
 
         colon_parts = symbol.split(':')
-        if len(colon_parts) == 3:
-            return Future(colon_parts[0], colon_parts[1], colon_parts[2], currency='USD')
+        if len(colon_parts) >= 3:
+            req = {
+                'sec_type': 'FUT',
+                'symbol': colon_parts[0],
+                'expiry': colon_parts[1],
+                'exchange': colon_parts[2],
+                'currency': 'USD',
+            }
+            req.update(self._parse_optional_contract_values(colon_parts[3:]))
+            return self._contract_from_request(req)
 
         return Stock(symbol, 'SMART', 'USD')
 
@@ -332,10 +398,12 @@ class IBProxy:
 
                     elif action == 'subscribe_market_data':
                         symbols = req.get('symbols', [])
-                        if not isinstance(symbols, list):
-                            response = {"status": "error", "message": "symbols must be a list"}
+                        contract_requests = req.get('contracts', [])
+                        if not isinstance(symbols, list) or not isinstance(contract_requests, list):
+                            response = {"status": "error", "message": "symbols and contracts must be lists"}
                         else:
                             contracts = [self._contract_from_symbol(s) for s in symbols]
+                            contracts.extend(self._contract_from_request(c) for c in contract_requests)
                             qualified_contracts = await self.ib.qualifyContractsAsync(*contracts)
                             self.subscribe_market_data(qualified_contracts)
                             response = {
