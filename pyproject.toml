@@ -10,3 +10,8 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyzmq>=27.1.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]

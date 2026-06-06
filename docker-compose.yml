@@ -25,5 +25,25 @@ services:
       - ./ibc/config.ini:/home/ibgateway/ibc/config.ini
       - ./logs:/home/ibgateway/logs
 
-  # The ib-proxy service will be added here in Phase 4
-  # or we can run it locally on the host.
+  ib-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ib-proxy
+    restart: unless-stopped
+    depends_on:
+      - ib-gateway
+    env_file:
+      - .env
+    environment:
+      - IB_HOST=ib-gateway
+      - IB_API_PORT=4004
+      - IB_CLIENT_ID=${IB_CLIENT_ID:-99}
+      - ZMQ_PUB_PORT=${ZMQ_PUB_PORT:-5555}
+      - ZMQ_REP_PORT=${ZMQ_REP_PORT:-5556}
+      - IB_SYMBOLS=${IB_SYMBOLS:-AAPL,FX:USDCNH,CRYPTO:BTC}
+    ports:
+      - "${ZMQ_PUB_PORT:-5555}:5555"
+      - "${ZMQ_REP_PORT:-5556}:5556"
+    volumes:
+      - ./logs:/app/logs

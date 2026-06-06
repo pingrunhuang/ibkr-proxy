@@ -5,12 +5,13 @@ A high-performance, asynchronous proxy that bridges the Interactive Brokers (IBK
 ## Features
 - **Headless IB Gateway**: Runs in Docker with automated login (IBC).
 - **ZeroMQ PUB/SUB**: Broadcasts data to any number of consumers.
+- **ZeroMQ REQ/REP commands**: Account, position, order, and runtime market-data subscription commands.
 - **Asynchronous**: Built with `ib_async` and `asyncio` for high throughput.
 - **Auto-reconnect**: Automatically reconnects to IB Gateway if the connection is lost.
 
 ## Architecture
 ```
-IBKR Server <-> IB Gateway (Docker) <-> Python Proxy <-> ZeroMQ (PUB/SUB)
+IBKR Server <-> IB Gateway (Docker) <-> Python Proxy <-> ZeroMQ PUB/SUB + REQ/REP
 ```
 
 ## Setup
@@ -28,23 +29,37 @@ Edit `.env`:
 - `TWS_USERID`: Your IBKR username
 - `TWS_PASSWORD`: Your IBKR password
 - `TRADING_MODE`: `paper` (highly recommended for testing)
+- `IB_SYMBOLS`: optional comma-separated startup subscriptions.
+- `ZMQ_PUB_PORT`: market-data/event publish port, default `5555`.
+- `ZMQ_REP_PORT`: command port, default `5556`.
 
-### 3. Start IB Gateway
+### 3. Start IB Gateway and Proxy
 ```bash
-docker compose up -d
+docker compose up --build -d
 ```
 Check logs to ensure it logs in successfully:
 ```bash
 docker compose logs -f
 ```
 
-### 4. Install Proxy Dependencies
+The compose stack starts:
+- `ib-gateway`: IB Gateway/IBC.
+- `ib-proxy`: Python proxy connected to `ib-gateway:4004`.
+
+From the trading engine host, use:
+```env
+ZMQ_HOST=127.0.0.1
+ZMQ_PORT=5555
+ZMQ_REP_PORT=5556
+```
+
+### 4. Install Proxy Dependencies for Local Development
 ```bash
 # Install uv if you haven't: https://astral.sh/uv/install.sh
 uv sync
 ```
 
-### 5. Run the Proxy
+### 5. Run the Proxy Locally
 ```bash
 # Example: Subscribe to stocks, forex, and crypto
 uv run src/main.py --symbols "AAPL,FX:USDCNH,CRYPTO:BTC"
@@ -66,3 +81,31 @@ uv run src/consumer_example.py
 - `executions.<account_id>`: Order fills and trade details.
 - `pnl.<account_id>.account`: Daily PnL for the account.
 - `pnl.<account_id>.<conId>`: Daily PnL for a specific contract.
+
+## ZeroMQ Commands
+Send JSON requests to `tcp://<host>:5556`:
+
+- `{"action": "get_account"}`
+- `{"action": "get_positions"}`
+- `{"action": "get_orders"}`
+- `{"action": "subscribe_market_data", "symbols": ["CASH.USD.CNH.IDEALPRO"]}`
+- `{"action": "place_order", "sec_type": "STK", "symbol": "AAPL", "exchange": "SMART", "currency": "USD", "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 100.0}`
+- `{"action": "cancel_order", "order_id": 123}`
+
+Supported symbol formats for `subscribe_market_data` include:
+- `AAPL`
+- `STK.AAPL.USD.SMART`
+- `CASH.USD.CNH.IDEALPRO`
+- `FUT.ES.USD.CME.202609`
+- `FX:USDCNH`
+- `CRYPTO:BTC`
+- `FUT:ES:202609:CME`
+- `ES:202609:CME`
+
+## Tests
+Proxy-side unit tests mock IBKR objects and do not require a live IB Gateway:
+```bash
+uv run --with pytest pytest tests -q
+```
+
+These tests validate contract parsing, order payload normalization, and subscription calls. Live IBKR integration checks should be run from the trading engine test suite with the explicit integration flags documented there.

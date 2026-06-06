@@ -62,6 +62,8 @@ class IBProxy:
         self.ib.accountValueEvent += self.on_account_value
         self.ib.positionEvent += self.on_position
         self.ib.positionEndEvent += self.on_position_end
+        self.ib.openOrderEvent += self.on_open_order
+        self.ib.orderStatusEvent += self.on_order_status
         self.ib.execDetailsEvent += self.on_exec_details
         self.ib.pnlEvent += self.on_pnl
         logger.info("Event handlers configured.")
@@ -101,11 +103,56 @@ class IBProxy:
         }
         asyncio.create_task(self.publish(topic, data))
 
+    def _contract_data(self, contract):
+        return {
+            'symbol': contract.symbol,
+            'currency': getattr(contract, 'currency', ''),
+            'secType': getattr(contract, 'secType', ''),
+            'exchange': getattr(contract, 'exchange', ''),
+            'conId': getattr(contract, 'conId', 0),
+            'localSymbol': getattr(contract, 'localSymbol', ''),
+            'lastTradeDateOrContractMonth': getattr(contract, 'lastTradeDateOrContractMonth', '')
+        }
+
+    def _order_update_data(self, trade):
+        order = trade.order
+        status = trade.orderStatus
+        data = {
+            **self._contract_data(trade.contract),
+            'account': getattr(order, 'account', ''),
+            'order_id': getattr(order, 'orderId', 0),
+            'permId': getattr(order, 'permId', 0),
+            'clientId': getattr(order, 'clientId', 0),
+            'orderRef': getattr(order, 'orderRef', ''),
+            'action': getattr(order, 'action', ''),
+            'orderType': getattr(order, 'orderType', ''),
+            'lmtPrice': getattr(order, 'lmtPrice', 0.0),
+            'totalQuantity': getattr(order, 'totalQuantity', 0),
+            'status': getattr(status, 'status', ''),
+            'filled': getattr(status, 'filled', 0),
+            'remaining': getattr(status, 'remaining', 0),
+            'avgFillPrice': getattr(status, 'avgFillPrice', 0.0),
+            'lastFillPrice': getattr(status, 'lastFillPrice', 0.0),
+            'whyHeld': getattr(status, 'whyHeld', '')
+        }
+        data['price'] = data['lmtPrice'] or data['avgFillPrice'] or data['lastFillPrice'] or 0.0
+        return data
+
+    def on_open_order(self, trade):
+        data = self._order_update_data(trade)
+        topic = f"orders.{data['account'] or 'all'}"
+        asyncio.create_task(self.publish(topic, data))
+
+    def on_order_status(self, trade):
+        data = self._order_update_data(trade)
+        topic = f"orders.{data['account'] or 'all'}"
+        asyncio.create_task(self.publish(topic, data))
+
     def on_position(self, position):
         topic = f"portfolio.{position.account}"
         data = {
             'account': position.account,
-            'symbol': position.contract.symbol,
+            **self._contract_data(position.contract),
             'position': position.position,
             'avgCost': position.avgCost
         }
@@ -138,6 +185,62 @@ class IBProxy:
             logger.info(f"Subscribing to market data for {contract.symbol}...")
             self.ib.reqMktData(contract)
 
+    def _contract_from_request(self, req):
+        contract_type = req.get('sec_type', 'STK')
+        symbol = req.get('symbol')
+        exchange = req.get('exchange', 'SMART')
+        currency = req.get('currency', 'USD')
+
+        if contract_type == 'STK':
+            return Stock(symbol, exchange, currency)
+        if contract_type == 'FUT':
+            return Future(symbol, req.get('expiry'), exchange, currency)
+        if contract_type == 'CASH':
+            return Forex(symbol, exchange)
+        if contract_type == 'CRYPTO':
+            return Crypto(symbol, exchange, currency)
+        return None
+
+    def _contract_from_symbol(self, symbol):
+        parts = symbol.split('.')
+        if len(parts) >= 4:
+            sec_type = parts[0].upper()
+            if sec_type in {'STK', 'CRYPTO'} and len(parts) == 4:
+                req = {
+                    'sec_type': sec_type,
+                    'symbol': parts[1],
+                    'currency': parts[2],
+                    'exchange': parts[3]
+                }
+                return self._contract_from_request(req)
+            if sec_type == 'CASH' and len(parts) == 4:
+                return Forex(f"{parts[1]}{parts[2]}", parts[3])
+            if sec_type == 'FUT' and len(parts) == 5:
+                req = {
+                    'sec_type': 'FUT',
+                    'symbol': parts[1],
+                    'currency': parts[2],
+                    'exchange': parts[3],
+                    'expiry': parts[4]
+                }
+                return self._contract_from_request(req)
+
+        if symbol.startswith('FX:'):
+            return Forex(symbol[3:])
+        if symbol.startswith('CRYPTO:'):
+            return Crypto(symbol[7:], 'PAXOS', 'USD')
+        if symbol.startswith('FUT:'):
+            fut_parts = symbol.split(':')
+            if len(fut_parts) == 4:
+                return Future(fut_parts[1], fut_parts[2], fut_parts[3])
+            raise ValueError(f"Invalid futures format: {symbol}. Expected FUT:SYMBOL:YYYYMM:EXCHANGE")
+
+        colon_parts = symbol.split(':')
+        if len(colon_parts) == 3:
+            return Future(colon_parts[0], colon_parts[1], colon_parts[2], currency='USD')
+
+        return Stock(symbol, 'SMART', 'USD')
+
     def subscribe_pnl(self, account, contracts=None):
         """Subscribe to PnL updates."""
         self.ib.reqPnL(account)
@@ -169,21 +272,7 @@ class IBProxy:
                     
                     if action == 'place_order':
                         # Expects: symbol, sec_type, exchange, currency, qty, action_type (BUY/SELL), order_type (MKT/LMT), [lmt_price]
-                        contract_type = req.get('sec_type', 'STK')
-                        symbol = req.get('symbol')
-                        exchange = req.get('exchange', 'SMART')
-                        currency = req.get('currency', 'USD')
-                        
-                        if contract_type == 'STK':
-                            contract = Stock(symbol, exchange, currency)
-                        elif contract_type == 'FUT':
-                            contract = Future(symbol, req.get('expiry'), exchange, currency)
-                        elif contract_type == 'CASH':
-                            contract = Forex(symbol, exchange)
-                        elif contract_type == 'CRYPTO':
-                            contract = Crypto(symbol, exchange, currency)
-                        else:
-                            contract = None
+                        contract = self._contract_from_request(req)
                             
                         if contract:
                             qty = float(req.get('qty', 0))
@@ -208,7 +297,7 @@ class IBProxy:
                     elif action == 'cancel_order':
                         order_id = req.get('order_id')
                         # Find the trade in current trades
-                        trades = [t for t in self.ib.trades() if t.order.orderId == order_id]
+                        trades = [t for t in self.ib.trades() if str(t.order.orderId) == str(order_id)]
                         if trades:
                             self.ib.cancelOrder(trades[0].order)
                             response = {"status": "success", "message": f"Order {order_id} cancellation requested"}
@@ -220,7 +309,7 @@ class IBProxy:
                         for p in self.ib.positions():
                             positions.append({
                                 'account': p.account,
-                                'symbol': p.contract.symbol,
+                                **self._contract_data(p.contract),
                                 'position': p.position,
                                 'avgCost': p.avgCost
                             })
@@ -236,6 +325,23 @@ class IBProxy:
                                 'currency': v.currency
                             })
                         response = {"status": "success", "data": account_data}
+
+                    elif action == 'get_orders':
+                        orders = [self._order_update_data(t) for t in self.ib.trades()]
+                        response = {"status": "success", "data": orders}
+
+                    elif action == 'subscribe_market_data':
+                        symbols = req.get('symbols', [])
+                        if not isinstance(symbols, list):
+                            response = {"status": "error", "message": "symbols must be a list"}
+                        else:
+                            contracts = [self._contract_from_symbol(s) for s in symbols]
+                            qualified_contracts = await self.ib.qualifyContractsAsync(*contracts)
+                            self.subscribe_market_data(qualified_contracts)
+                            response = {
+                                "status": "success",
+                                "data": [self._contract_data(c) for c in qualified_contracts]
+                            }
                         
                     await self.rep_socket.send_json(response)
             except Exception as e:
