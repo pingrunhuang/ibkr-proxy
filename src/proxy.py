@@ -24,6 +24,9 @@ class IBProxy:
         
         # Internal state
         self._is_running = False
+        self.contracts_by_con_id = {}
+        self.contracts_by_symbol_key = {}
+        self.request_symbol_to_con_id = {}
 
     def _patch_ib_wrapper(self):
         """Patch the IB wrapper to emit custom events for sync completion."""
@@ -76,12 +79,15 @@ class IBProxy:
 
     def on_pending_tickers(self, tickers):
         for t in tickers:
-            topic = f"marketdata.{t.contract.secType}.{t.contract.symbol}.{t.contract.currency}.{t.contract.exchange}"
+            try:
+                metadata = self._contract_metadata(t.contract)
+                topic = metadata['topic']
+            except ValueError as e:
+                logger.error(f"Skipping market data tick without a unique topic: {e}")
+                continue
+
             data = {
-                'symbol': t.contract.symbol,
-                'currency': t.contract.currency,
-                'secType': t.contract.secType,
-                'exchange': t.contract.exchange,
+                **metadata,
                 'bid': t.bid,
                 'bidSize': t.bidSize,
                 'ask': t.ask,
@@ -115,6 +121,64 @@ class IBProxy:
             'multiplier': getattr(contract, 'multiplier', ''),
             'tradingClass': getattr(contract, 'tradingClass', '')
         }
+
+    def _symbol_key(self, contract):
+        data = self._contract_data(contract)
+        sec_type = data['secType']
+        parts = [sec_type, data['symbol'], data['currency'], data['exchange']]
+        if sec_type == 'FUT':
+            parts.extend([
+                data['lastTradeDateOrContractMonth'],
+                data['multiplier'],
+                data['tradingClass'],
+            ])
+        return '.'.join(str(part) for part in parts if part not in (None, ''))
+
+    def _market_data_topic(self, contract):
+        con_id = getattr(contract, 'conId', 0)
+        if not con_id:
+            raise ValueError(f"contract has no conId after qualification: {contract}")
+        return f"marketdata.IB.{con_id}"
+
+    def _contract_metadata(self, contract, request_symbol=None):
+        data = self._contract_data(contract)
+        con_id = data['conId']
+        if not request_symbol and con_id:
+            stored = self.contracts_by_con_id.get(str(con_id), {})
+            request_symbol = stored.get('request_symbol')
+
+        metadata = {
+            **data,
+            'symbol_key': self._symbol_key(contract),
+            'topic': self._market_data_topic(contract),
+        }
+        if request_symbol:
+            metadata['request_symbol'] = request_symbol
+        return metadata
+
+    def _register_contract(self, contract, request_symbol=None):
+        metadata = self._contract_metadata(contract, request_symbol)
+        con_id = str(metadata['conId'])
+        self.contracts_by_con_id[con_id] = {
+            **metadata,
+            'contract': contract,
+        }
+        self.contracts_by_symbol_key[metadata['symbol_key']] = con_id
+        if request_symbol:
+            self.request_symbol_to_con_id[request_symbol] = con_id
+
+        logger.info(
+            "Qualified IB contract "
+            f"request_symbol={request_symbol or ''} "
+            f"symbol_key={metadata['symbol_key']} "
+            f"conId={metadata['conId']} "
+            f"topic={metadata['topic']} "
+            f"localSymbol={metadata['localSymbol']} "
+            f"expiry={metadata['lastTradeDateOrContractMonth']} "
+            f"multiplier={metadata['multiplier']} "
+            f"tradingClass={metadata['tradingClass']}"
+        )
+        return metadata
 
     def _order_update_data(self, trade):
         order = trade.order
@@ -184,7 +248,14 @@ class IBProxy:
     def subscribe_market_data(self, contracts):
         """Subscribe to real-time market data for a list of contracts."""
         for contract in contracts:
-            logger.info(f"Subscribing to market data for {contract.symbol}...")
+            metadata = self._contract_metadata(contract)
+            logger.info(
+                "Subscribing IB market data "
+                f"topic={metadata['topic']} "
+                f"symbol_key={metadata['symbol_key']} "
+                f"conId={metadata['conId']} "
+                f"localSymbol={metadata['localSymbol']}"
+            )
             self.ib.reqMktData(contract)
 
     def _apply_contract_overrides(self, contract, values):
@@ -208,6 +279,9 @@ class IBProxy:
         symbol = req.get('symbol')
         exchange = req.get('exchange', 'SMART')
         currency = req.get('currency', 'USD')
+
+        if not symbol:
+            return None
 
         if contract_type == 'STK':
             return Stock(symbol, exchange, currency)
@@ -307,6 +381,117 @@ class IBProxy:
 
         return Stock(symbol, 'SMART', 'USD')
 
+    def _contract_request_records(self, symbols=None, contract_requests=None):
+        records = []
+        for symbol in symbols or []:
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise ValueError(f"Invalid symbol request: {symbol}")
+            request_symbol = symbol.strip()
+            records.append({
+                'request_symbol': request_symbol,
+                'contract': self._contract_from_symbol(request_symbol),
+            })
+
+        for req in contract_requests or []:
+            if not isinstance(req, dict):
+                raise ValueError(f"Invalid contract request: {req}")
+            contract = self._contract_from_request(req)
+            if not contract:
+                raise ValueError(f"Invalid contract request: {req}")
+            request_symbol = req.get('request_symbol') or req.get('symbol_key') or self._symbol_key(contract)
+            records.append({
+                'request_symbol': request_symbol,
+                'contract': contract,
+            })
+        return records
+
+    async def qualify_contracts(self, symbols=None, contract_requests=None):
+        records = self._contract_request_records(symbols, contract_requests)
+        if not records:
+            logger.info("No IB contracts requested for qualification.")
+            return []
+
+        logger.info(
+            "Qualifying IB contracts "
+            f"count={len(records)} "
+            f"requests={[r['request_symbol'] for r in records]}"
+        )
+        try:
+            qualified_contracts = await self.ib.qualifyContractsAsync(*(r['contract'] for r in records))
+        except Exception:
+            logger.exception(
+                "IB contract qualification failed "
+                f"requests={[r['request_symbol'] for r in records]}"
+            )
+            raise
+
+        if len(qualified_contracts) != len(records):
+            missing_requests = [r['request_symbol'] for r in records[len(qualified_contracts):]]
+            logger.warning(
+                "IB qualification returned a different number of contracts "
+                f"requested={len(records)} returned={len(qualified_contracts)} "
+                f"missing_requests={missing_requests}"
+            )
+
+        results = []
+        for record, contract in zip(records, qualified_contracts):
+            metadata = self._register_contract(contract, record['request_symbol'])
+            results.append({
+                'contract': contract,
+                'metadata': metadata,
+            })
+        return results
+
+    def _contract_for_order_request(self, req):
+        con_id = req.get('con_id') or req.get('conId')
+        if con_id not in (None, ''):
+            contract_record = self.contracts_by_con_id.get(str(con_id))
+            if contract_record:
+                logger.info(f"Using registered IB contract for order conId={con_id}")
+                return contract_record['contract']
+            logger.warning(
+                "Order requested conId that is not in the local registry; "
+                f"falling back to request contract fields conId={con_id}"
+            )
+
+        contract = self._contract_from_request(req)
+        if contract:
+            return contract
+        return None
+
+    def _order_from_request(self, req):
+        qty = float(req.get('qty', 0))
+        action_type = req.get('action_type', 'BUY')
+        order_type = req.get('order_type', 'MKT')
+
+        if order_type == 'MKT':
+            return MarketOrder(action_type, qty)
+        if order_type == 'LMT':
+            return LimitOrder(action_type, qty, req.get('lmt_price'))
+        return None
+
+    def _place_order_from_request(self, req):
+        contract = self._contract_for_order_request(req)
+        if not contract:
+            return {"status": "error", "message": "Invalid contract type"}
+
+        order = self._order_from_request(req)
+        if not order:
+            return {"status": "error", "message": "Invalid order type"}
+
+        metadata = self._contract_metadata(contract) if getattr(contract, 'conId', 0) else self._contract_data(contract)
+        logger.info(
+            "Placing IB order "
+            f"conId={metadata.get('conId', '')} "
+            f"symbol_key={metadata.get('symbol_key', '')} "
+            f"action={req.get('action_type', 'BUY')} "
+            f"order_type={req.get('order_type', 'MKT')} "
+            f"qty={req.get('qty', 0)} "
+            f"lmt_price={req.get('lmt_price', '')}"
+        )
+        trade = self.ib.placeOrder(contract, order)
+        return {"status": "success", "order_id": trade.order.orderId}
+
     def subscribe_pnl(self, account, contracts=None):
         """Subscribe to PnL updates."""
         self.ib.reqPnL(account)
@@ -317,11 +502,9 @@ class IBProxy:
     async def publish(self, topic, data):
         """Publish data to ZeroMQ."""
         message = json.dumps(data, default=str)
+        logger.info(f"Publishing ZMQ topic={topic} payload={message}")
         await self.pub_socket.send_string(f"{topic} {message}")
-        logger.debug(f"Published to topic {topic}: {message}")
-        # Using debug to avoid flooding the console, but info could be used if preferred.
-        # Given the user's request, I will use info for visibility.
-        logger.info(f"Successfully published to ZMQ: {topic}")
+        logger.debug(f"Published ZMQ topic={topic}")
 
     async def _command_loop(self):
         """Listen for and process ZMQ REP commands."""
@@ -338,27 +521,7 @@ class IBProxy:
                     
                     if action == 'place_order':
                         # Expects: symbol, sec_type, exchange, currency, qty, action_type (BUY/SELL), order_type (MKT/LMT), [lmt_price]
-                        contract = self._contract_from_request(req)
-                            
-                        if contract:
-                            qty = float(req.get('qty', 0))
-                            action_type = req.get('action_type', 'BUY')
-                            order_type = req.get('order_type', 'MKT')
-                            
-                            if order_type == 'MKT':
-                                order = MarketOrder(action_type, qty)
-                            elif order_type == 'LMT':
-                                order = LimitOrder(action_type, qty, req.get('lmt_price'))
-                            else:
-                                order = None
-                                
-                            if order:
-                                trade = self.ib.placeOrder(contract, order)
-                                response = {"status": "success", "order_id": trade.order.orderId}
-                            else:
-                                response = {"status": "error", "message": "Invalid order type"}
-                        else:
-                            response = {"status": "error", "message": "Invalid contract type"}
+                        response = self._place_order_from_request(req)
                             
                     elif action == 'cancel_order':
                         order_id = req.get('order_id')
@@ -396,19 +559,30 @@ class IBProxy:
                         orders = [self._order_update_data(t) for t in self.ib.trades()]
                         response = {"status": "success", "data": orders}
 
+                    elif action == 'qualify_contracts':
+                        symbols = req.get('symbols', [])
+                        contract_requests = req.get('contracts', [])
+                        if not isinstance(symbols, list) or not isinstance(contract_requests, list):
+                            response = {"status": "error", "message": "symbols and contracts must be lists"}
+                        else:
+                            qualified = await self.qualify_contracts(symbols, contract_requests)
+                            response = {
+                                "status": "success",
+                                "data": [r['metadata'] for r in qualified]
+                            }
+
                     elif action == 'subscribe_market_data':
                         symbols = req.get('symbols', [])
                         contract_requests = req.get('contracts', [])
                         if not isinstance(symbols, list) or not isinstance(contract_requests, list):
                             response = {"status": "error", "message": "symbols and contracts must be lists"}
                         else:
-                            contracts = [self._contract_from_symbol(s) for s in symbols]
-                            contracts.extend(self._contract_from_request(c) for c in contract_requests)
-                            qualified_contracts = await self.ib.qualifyContractsAsync(*contracts)
+                            qualified = await self.qualify_contracts(symbols, contract_requests)
+                            qualified_contracts = [r['contract'] for r in qualified]
                             self.subscribe_market_data(qualified_contracts)
                             response = {
                                 "status": "success",
-                                "data": [self._contract_data(c) for c in qualified_contracts]
+                                "data": [r['metadata'] for r in qualified]
                             }
                         
                     await self.rep_socket.send_json(response)

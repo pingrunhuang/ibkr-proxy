@@ -72,10 +72,9 @@ uv run src/consumer_example.py
 ```
 
 ## ZeroMQ Topics
-- `marketdata.<secType>.<symbol>.<currency>.<exchange>`: Streaming tick data.
-  - Stocks: `marketdata.STK.AAPL.USD.SMART`
-  - Forex: `marketdata.CASH.USD.CNH.IDEALPRO`
-  - Crypto: `marketdata.CRYPTO.BTC.USD.PAXOS`
+- `marketdata.IB.<conId>`: Streaming tick data keyed by IBKR's unique contract ID.
+  - Example: `marketdata.IB.760200615`
+  - The payload includes `request_symbol`, `symbol_key`, `conId`, `localSymbol`, `lastTradeDateOrContractMonth`, `multiplier`, and `tradingClass`.
 - `account.<account_id>`: Account balance and margin.
 - `portfolio.<account_id>`: Position updates.
 - `executions.<account_id>`: Order fills and trade details.
@@ -88,11 +87,33 @@ Send JSON requests to `tcp://<host>:5556`:
 - `{"action": "get_account"}`
 - `{"action": "get_positions"}`
 - `{"action": "get_orders"}`
+- `{"action": "qualify_contracts", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
 - `{"action": "subscribe_market_data", "symbols": ["CASH.USD.CNH.IDEALPRO"]}`
 - `{"action": "subscribe_market_data", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
 - `{"action": "subscribe_market_data", "contracts": [{"sec_type": "FUT", "symbol": "SI", "exchange": "COMEX", "currency": "USD", "expiry": "202608", "multiplier": "5000", "trading_class": "SI"}]}`
+- `{"action": "place_order", "con_id": 760200615, "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 38.0}`
 - `{"action": "place_order", "sec_type": "STK", "symbol": "AAPL", "exchange": "SMART", "currency": "USD", "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 100.0}`
 - `{"action": "cancel_order", "order_id": 123}`
+
+`qualify_contracts` resolves readable symbols without subscribing. `subscribe_market_data` resolves and subscribes. Both return contract metadata with the ZMQ topic:
+```json
+{
+  "request_symbol": "FUT:SI:202608:COMEX:5000:SI",
+  "symbol_key": "FUT.SI.USD.COMEX.20260827.5000.SI",
+  "topic": "marketdata.IB.760200615",
+  "conId": 760200615,
+  "secType": "FUT",
+  "symbol": "SI",
+  "currency": "USD",
+  "exchange": "COMEX",
+  "localSymbol": "SIQ6",
+  "lastTradeDateOrContractMonth": "20260827",
+  "multiplier": "5000",
+  "tradingClass": "SI"
+}
+```
+
+If `place_order` includes `con_id`, the proxy first looks up the qualified contract in its local registry and places the order with that exact contract. This avoids ambiguous futures orders after the engine has qualified and subscribed the contract.
 
 Supported symbol formats for `subscribe_market_data` include:
 - `AAPL`
