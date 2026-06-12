@@ -53,10 +53,8 @@ async def main():
         
         # Subscribe to market data for symbols.
         symbols = [s.strip() for s in args.symbols.split(',') if s.strip()]
-        contracts = [proxy._contract_from_symbol(s) for s in symbols]
-        
-        # Qualify contracts (resolves conId, exchange, etc.)
-        qualified_contracts = await proxy.ib.qualifyContractsAsync(*contracts)
+        qualified = await proxy.qualify_contracts(symbols=symbols)
+        qualified_contracts = [r['contract'] for r in qualified]
         proxy.subscribe_market_data(qualified_contracts)
         
         # Subscribe to account updates
