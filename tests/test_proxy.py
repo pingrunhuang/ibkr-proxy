@@ -82,6 +82,25 @@ class FakeOrderStatus:
     whyHeld = ""
 
 
+class FakeExecution:
+    def __init__(self):
+        self.execId = "0001.01"
+        self.acctNumber = "DU12345"
+        self.exchange = "COMEX"
+        self.side = "BOT"
+        self.shares = 1.0
+        self.price = 4216.4
+        self.orderId = 321
+        self.time = "2026-06-12T10:15:02+00:00"
+
+
+class FakeCommissionReport:
+    def __init__(self):
+        self.execId = "0001.01"
+        self.commission = 2.52
+        self.currency = "USD"
+
+
 class FakeIBForSubscriptions:
     def __init__(self):
         self.market_data_requests = []
@@ -294,6 +313,35 @@ def test_on_pending_tickers_publishes_conid_topic_and_contract_metadata(proxy):
     assert data["tradingClass"] == "SI"
     assert data["bid"] == 38.1
     assert data["ask"] == 38.2
+
+
+def test_on_exec_details_publishes_execution_topic_and_payload(proxy):
+    contract = silver_contract("20260827", 760200615, "SIQ6")
+    published = []
+
+    async def fake_publish(topic, data):
+        published.append((topic, data))
+
+    async def run_execution():
+        proxy.publish = fake_publish
+        fill = types.SimpleNamespace(
+            contract=contract,
+            execution=FakeExecution(),
+            commissionReport=FakeCommissionReport(),
+        )
+        proxy.on_exec_details(types.SimpleNamespace(), fill)
+        await asyncio.sleep(0)
+
+    asyncio.run(run_execution())
+
+    assert len(published) == 1
+    topic, data = published[0]
+    assert topic == "executions.DU12345"
+    assert data["account"] == "DU12345"
+    assert data["conId"] == 760200615
+    assert data["execution"]["execId"] == "0001.01"
+    assert data["execution"]["orderId"] == 321
+    assert data["commission"]["commission"] == 2.52
 
 
 def test_place_order_with_conid_uses_registered_contract(proxy):

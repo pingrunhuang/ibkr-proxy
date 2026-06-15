@@ -1,9 +1,10 @@
 import asyncio
 import json
+from dataclasses import asdict, is_dataclass
 import zmq
 import zmq.asyncio
 from loguru import logger
-from ib_async import IB, util, Event, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
+from ib_async import IB, Event, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
 
 class IBProxy:
     def __init__(self, ib_host='127.0.0.1', ib_port=4001, client_id=1, zmq_port=5555, zmq_rep_port=5556):
@@ -122,6 +123,12 @@ class IBProxy:
             'tradingClass': getattr(contract, 'tradingClass', '')
         }
 
+    @staticmethod
+    def _object_data(value):
+        if is_dataclass(value):
+            return asdict(value)
+        return dict(vars(value))
+
     def _symbol_key(self, contract):
         data = self._contract_data(contract)
         sec_type = data['secType']
@@ -225,14 +232,21 @@ class IBProxy:
         asyncio.create_task(self.publish(topic, data))
 
     def on_exec_details(self, trade, fill):
-        topic = f"executions.{fill.execution.acctNumber}"
-        data = {
-            'account': fill.execution.acctNumber,
-            'symbol': fill.contract.symbol,
-            'execution': util.asDict(fill.execution),
-            'commission': util.asDict(fill.commissionReport) if fill.commissionReport else None
-        }
-        asyncio.create_task(self.publish(topic, data))
+        try:
+            topic = f"executions.{fill.execution.acctNumber}"
+            data = {
+                'account': fill.execution.acctNumber,
+                **self._contract_data(fill.contract),
+                'execution': self._object_data(fill.execution),
+                'commission': (
+                    self._object_data(fill.commissionReport)
+                    if fill.commissionReport
+                    else None
+                )
+            }
+            asyncio.create_task(self.publish(topic, data))
+        except Exception:
+            logger.exception("Failed to publish IB execution details")
 
     def on_pnl(self, pnl):
         # pnl is a Pnl object or PnlSingle object
@@ -242,7 +256,7 @@ class IBProxy:
         else:
             topic = f"pnl.{pnl.account}.{pnl.conId}"
             
-        data = util.asDict(pnl)
+        data = self._object_data(pnl)
         asyncio.create_task(self.publish(topic, data))
 
     def subscribe_market_data(self, contracts):
