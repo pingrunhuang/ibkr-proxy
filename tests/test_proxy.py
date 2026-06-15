@@ -129,18 +129,20 @@ class FakeIBForProxyCommands:
 
 
 class FakeMarketOrder:
-    def __init__(self, action, qty):
+    def __init__(self, action, qty, tif=""):
         self.action = action
         self.totalQuantity = qty
         self.orderType = "MKT"
+        self.tif = tif
 
 
 class FakeLimitOrder:
-    def __init__(self, action, qty, lmt_price):
+    def __init__(self, action, qty, lmt_price, tif=""):
         self.action = action
         self.totalQuantity = qty
         self.lmtPrice = lmt_price
         self.orderType = "LMT"
+        self.tif = tif
 
 
 def install_fake_ib_async():
@@ -365,6 +367,7 @@ def test_place_order_with_conid_uses_registered_contract(proxy):
     assert placed_order.totalQuantity == 1
     assert placed_order.orderType == "LMT"
     assert placed_order.lmtPrice == 38.0
+    assert placed_order.tif == "DAY"
 
 
 def test_order_update_data_normalizes_trade(proxy):

@@ -479,9 +479,9 @@ class IBProxy:
         order_type = req.get('order_type', 'MKT')
 
         if order_type == 'MKT':
-            return MarketOrder(action_type, qty)
+            return MarketOrder(action_type, qty, tif='DAY')
         if order_type == 'LMT':
-            return LimitOrder(action_type, qty, req.get('lmt_price'))
+            return LimitOrder(action_type, qty, req.get('lmt_price'), tif='DAY')
         return None
 
     def _place_order_from_request(self, req):
