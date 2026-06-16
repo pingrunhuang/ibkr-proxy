@@ -370,6 +370,34 @@ def test_place_order_with_conid_uses_registered_contract(proxy):
     assert placed_order.tif == "DAY"
 
 
+def test_place_order_uses_copy_with_normalized_registered_future_expiry(proxy):
+    contract = silver_contract("20260630 19:30:00 GB", 361002937, "COILQ6")
+    contract.symbol = "COIL"
+    contract.exchange = "IPE"
+    contract.multiplier = "1000"
+    contract.tradingClass = "COIL"
+    proxy._register_contract(contract, "FUT:COIL:202606:IPE:1000:COIL")
+    fake_ib = FakeIBForProxyCommands()
+    proxy.ib = fake_ib
+
+    response = proxy._place_order_from_request({
+        "con_id": 361002937,
+        "qty": 1,
+        "action_type": "SELL",
+        "order_type": "LMT",
+        "lmt_price": 80.38,
+    })
+
+    assert response == {"status": "success", "order_id": 987}
+    placed_contract, placed_order = fake_ib.placed_orders[0]
+    assert placed_contract is not contract
+    assert placed_contract.lastTradeDateOrContractMonth == "20260630"
+    assert contract.lastTradeDateOrContractMonth == "20260630 19:30:00 GB"
+    assert placed_contract.conId == 361002937
+    assert placed_contract.localSymbol == "COILQ6"
+    assert placed_order.tif == "DAY"
+
+
 def test_order_update_data_normalizes_trade(proxy):
     trade = types.SimpleNamespace(
         contract=FakeStock("AAPL", "SMART", "USD"),

@@ -1,5 +1,7 @@
 import asyncio
+import copy
 import json
+import re
 from dataclasses import asdict, is_dataclass
 import zmq
 import zmq.asyncio
@@ -146,6 +148,34 @@ class IBProxy:
         if not con_id:
             raise ValueError(f"contract has no conId after qualification: {contract}")
         return f"marketdata.IB.{con_id}"
+
+    def _normalize_order_expiry(self, expiry):
+        if expiry in (None, ''):
+            return expiry
+
+        value = str(expiry)
+        match = re.match(r'^(\d{8}) \d{2}:\d{2}:\d{2} ', value)
+        if match:
+            return match.group(1)
+        return value
+
+    def _contract_for_order(self, contract):
+        if getattr(contract, 'secType', '') != 'FUT':
+            return contract
+
+        expiry = getattr(contract, 'lastTradeDateOrContractMonth', '')
+        normalized = self._normalize_order_expiry(expiry)
+        if normalized == expiry:
+            return contract
+
+        order_contract = copy.copy(contract)
+        order_contract.lastTradeDateOrContractMonth = normalized
+        logger.info(
+            "Using normalized futures expiry for IB order "
+            f"conId={getattr(contract, 'conId', '')} "
+            f"from={expiry} to={normalized}"
+        )
+        return order_contract
 
     def _contract_metadata(self, contract, request_symbol=None):
         data = self._contract_data(contract)
@@ -462,7 +492,7 @@ class IBProxy:
             contract_record = self.contracts_by_con_id.get(str(con_id))
             if contract_record:
                 logger.info(f"Using registered IB contract for order conId={con_id}")
-                return contract_record['contract']
+                return self._contract_for_order(contract_record['contract'])
             logger.warning(
                 "Order requested conId that is not in the local registry; "
                 f"falling back to request contract fields conId={con_id}"
