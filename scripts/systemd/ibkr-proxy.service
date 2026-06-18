@@ -1,0 +1,18 @@
+[Unit]
+Description=IBKR ZeroMQ proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@RUN_USER@
+WorkingDirectory=@PROJECT_ROOT@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'set -a; . ./.env; set +a; exec ./.venv/bin/python ./src/main.py'
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target

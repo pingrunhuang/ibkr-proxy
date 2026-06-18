@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop IBKR ZeroMQ proxy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block stop ibkr-proxy.service

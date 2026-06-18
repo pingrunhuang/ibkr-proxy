@@ -1,0 +1,12 @@
+[Unit]
+Description=Stop IBKR ZeroMQ proxy on schedule
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:10:00
+OnCalendar=Tue..Sat *-*-* 03:10:00
+AccuracySec=1s
+Persistent=false
+Unit=ibkr-proxy-stop.service
+
+[Install]
+WantedBy=timers.target
