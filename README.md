@@ -33,6 +33,42 @@ Edit `.env`:
 - `ZMQ_PUB_PORT`: market-data/event publish port, default `5555`.
 - `ZMQ_REP_PORT`: command port, default `5556`.
 
+Complete `.env` template:
+
+```env
+# IB Gateway / IBC login
+TWS_USERID=your_ibkr_username
+TWS_PASSWORD=your_ibkr_password
+TRADING_MODE=paper
+TWS_ACCEPT_EULA=yes
+READ_ONLY_API=no
+
+# IB Gateway VNC password used by docker-compose.yml.
+# docker-compose maps this into the container as VNC_SERVER_PASSWORD.
+VNC_PASSWORD=ibgateway
+
+# Logging
+LOG_LEVEL=INFO
+LOG_BACKUP_COUNT=30
+
+# Proxy connection to IB Gateway.
+# docker-compose overrides these to IB_HOST=ib-gateway and IB_API_PORT=4004.
+IB_HOST=127.0.0.1
+IB_API_PORT=4002
+IB_CLIENT_ID=99
+
+# Initial market data subscriptions for proxy startup.
+# Runtime subscriptions can also be requested via the subscribe_market_data command.
+# Ambiguous futures such as COMEX silver need a multiplier or trading class.
+# Example standard silver: FUT:SI:202608:COMEX:5000:SI
+# Example mini silver: FUT:SI:202608:COMEX:1000:SIL
+IB_SYMBOLS=AAPL,FX:USDCNH,CRYPTO:BTC
+
+# ZeroMQ ports exposed by the proxy.
+ZMQ_PUB_PORT=5555
+ZMQ_REP_PORT=5556
+```
+
 ### 3. Start IB Gateway and Proxy
 ```bash
 docker compose up --build -d
@@ -51,6 +87,19 @@ From the trading engine host, use:
 ZMQ_HOST=127.0.0.1
 ZMQ_PORT=5555
 ZMQ_REP_PORT=5556
+```
+
+The systemd installer supports these one-off override variables when running
+`scripts/install_systemd.sh`; they are shell environment overrides, not values
+that the service reads from `.env` at runtime:
+
+```env
+SYSTEMD_UNIT_DIR=/etc/systemd/system
+SYSTEMD_BIN_DIR=/usr/local/bin
+NOTIFY_EMAIL_CONFIG_DIR=/etc/notify-email
+NOTIFY_EMAIL_ASSET_DIR=/home/ubuntu/code
+NOTIFY_EMAIL_SOURCE=/home/ubuntu/code/notify-email.py
+SKIP_SYSTEMD_RELOAD=false
 ```
 
 ### 4. Install Proxy Dependencies for Local Development
@@ -85,6 +134,7 @@ uv run src/consumer_example.py
 Send JSON requests to `tcp://<host>:5556`:
 
 - `{"action": "get_account"}`
+- `{"action": "ping"}`
 - `{"action": "get_positions"}`
 - `{"action": "get_orders"}`
 - `{"action": "qualify_contracts", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`

@@ -51,6 +51,7 @@ async def main():
         logger.info("Interrupted by user.")
     except Exception as e:
         logger.exception(f"Unhandled exception: {e}")
+        raise
     finally:
         proxy.stop()
 

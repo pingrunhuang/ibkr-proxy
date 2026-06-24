@@ -60,6 +60,9 @@ class FakeIB:
     def __init__(self):
         self.wrapper = types.SimpleNamespace(positionEnd=lambda: None)
 
+    def isConnected(self):
+        return True
+
 
 class FakeOrder:
     account = "DU12345"

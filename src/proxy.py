@@ -562,8 +562,15 @@ class IBProxy:
                     logger.info(f"Received command: {action}")
                     
                     response = {"status": "error", "message": "Unknown action"}
-                    
-                    if action == 'place_order':
+
+                    if action == 'ping':
+                        response = {
+                            "status": "success",
+                            "message": "pong",
+                            "ib_connected": bool(self.ib.isConnected()),
+                        }
+
+                    elif action == 'place_order':
                         # Expects: symbol, sec_type, exchange, currency, qty, action_type (BUY/SELL), order_type (MKT/LMT), [lmt_price]
                         response = self._place_order_from_request(req)
                             
