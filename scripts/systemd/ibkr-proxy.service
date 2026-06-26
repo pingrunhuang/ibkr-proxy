@@ -2,7 +2,6 @@
 Description=IBKR ZeroMQ proxy
 Wants=network-online.target
 After=network-online.target
-OnFailure=notify-email@%n.service
 
 [Service]
 Type=simple

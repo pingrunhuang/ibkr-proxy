@@ -95,12 +95,11 @@ that the service reads from `.env` at runtime:
 
 ```env
 SYSTEMD_UNIT_DIR=/etc/systemd/system
-SYSTEMD_BIN_DIR=/usr/local/bin
-NOTIFY_EMAIL_CONFIG_DIR=/etc/notify-email
-NOTIFY_EMAIL_ASSET_DIR=/home/ubuntu/code
-NOTIFY_EMAIL_SOURCE=/home/ubuntu/code/notify-email.py
 SKIP_SYSTEMD_RELOAD=false
 ```
+
+The installer only installs `ibkr-proxy.service`. Scheduling is handled by
+Prefect, not by systemd timers.
 
 ### 4. Install Proxy Dependencies for Local Development
 ```bash
