@@ -168,6 +168,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 proxy_module = importlib.import_module("proxy")
 
 
+def test_trading_day_supports_ib_timestamp_formats():
+    assert proxy_module._trading_day_from_timestamp("2026-06-12T10:15:02+00:00") == "20260612"
+    assert proxy_module._trading_day_from_timestamp("260612101502.000") == "20260612"
+
+
 @pytest.fixture
 def proxy():
     instance = proxy_module.IBProxy()
@@ -347,6 +352,52 @@ def test_on_exec_details_publishes_execution_topic_and_payload(proxy):
     assert data["execution"]["execId"] == "0001.01"
     assert data["execution"]["orderId"] == 321
     assert data["commission"]["commission"] == 2.52
+    assert data["event_id"].startswith("trade:ib_proxy:")
+    assert data["gateway_name"] == "IB_PROXY"
+    assert data["account_id"] == "DU12345"
+    assert data["trading_day"] == "20260612"
+    assert data["exchange"] == "COMEX"
+    assert data["trade_id"] == "0001.01"
+    assert data["order_id"] == "321"
+    assert data["client_id"] == ""
+    assert data["strategy_id"] == ""
+    assert data["client_order_id"] == ""
+
+
+def test_on_exec_details_event_id_is_stable_and_changes_per_fill(proxy):
+    contract = silver_contract("20260827", 760200615, "SIQ6")
+    published = []
+
+    async def fake_publish(topic, data):
+        published.append((topic, data))
+
+    async def run_executions():
+        proxy.publish = fake_publish
+        first_execution = FakeExecution()
+        first_fill = types.SimpleNamespace(
+            contract=contract,
+            execution=first_execution,
+            commissionReport=None,
+        )
+        proxy.on_exec_details(types.SimpleNamespace(), first_fill)
+        proxy.on_exec_details(types.SimpleNamespace(), first_fill)
+
+        second_execution = FakeExecution()
+        second_execution.execId = "0001.02"
+        second_fill = types.SimpleNamespace(
+            contract=contract,
+            execution=second_execution,
+            commissionReport=None,
+        )
+        proxy.on_exec_details(types.SimpleNamespace(), second_fill)
+        await asyncio.sleep(0)
+
+    asyncio.run(run_executions())
+
+    assert len(published) == 3
+    first_event_id = published[0][1]["event_id"]
+    assert published[1][1]["event_id"] == first_event_id
+    assert published[2][1]["event_id"] != first_event_id
 
 
 def test_place_order_with_conid_uses_registered_contract(proxy):

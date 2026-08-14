@@ -1,12 +1,66 @@
 import asyncio
 import copy
+import hashlib
 import json
 import re
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 import zmq
 import zmq.asyncio
 from loguru import logger
 from ib_async import IB, Event, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
+
+
+def _text(value):
+    return "" if value is None else str(value).strip()
+
+
+def _trading_day_from_timestamp(value):
+    text = _text(value)
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10].replace("-", "")
+    if (
+        len(text) >= 8
+        and text[:8].isdigit()
+        and 1900 <= int(text[:4]) <= 2199
+    ):
+        return text[:8]
+    if len(text) >= 6 and text[:6].isdigit():
+        try:
+            return datetime.strptime(text[:6], "%y%m%d").strftime("%Y%m%d")
+        except ValueError:
+            return ""
+    return ""
+
+
+def _trade_event_id(
+    *,
+    gateway_name,
+    account_id,
+    trading_day,
+    exchange,
+    trade_id,
+    fallback,
+):
+    """Return a stable identifier for one native fill."""
+    identity = {
+        "gateway_name": gateway_name,
+        "account_id": account_id,
+        "trading_day": trading_day,
+        "exchange": exchange,
+        "trade_id": trade_id,
+    }
+    if not trade_id:
+        identity["fallback"] = fallback
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8")
+    return f"trade:{gateway_name.lower()}:{hashlib.sha256(encoded).hexdigest()}"
+
 
 class IBProxy:
     def __init__(self, ib_host='127.0.0.1', ib_port=4001, client_id=1, zmq_port=5555, zmq_rep_port=5556):
@@ -263,11 +317,45 @@ class IBProxy:
 
     def on_exec_details(self, trade, fill):
         try:
-            topic = f"executions.{fill.execution.acctNumber}"
+            execution = self._object_data(fill.execution)
+            contract = self._contract_data(fill.contract)
+            gateway_name = "IB_PROXY"
+            account_id = _text(execution.get("acctNumber"))
+            trading_day = _trading_day_from_timestamp(execution.get("time"))
+            exchange = _text(execution.get("exchange") or contract.get("exchange"))
+            trade_id = _text(execution.get("execId"))
+            order_id = _text(execution.get("orderId"))
+            client_order_id = _text(execution.get("orderRef"))
+            topic = f"executions.{account_id}"
             data = {
-                'account': fill.execution.acctNumber,
-                **self._contract_data(fill.contract),
-                'execution': self._object_data(fill.execution),
+                "event_id": _trade_event_id(
+                    gateway_name=gateway_name,
+                    account_id=account_id,
+                    trading_day=trading_day,
+                    exchange=exchange,
+                    trade_id=trade_id,
+                    fallback={
+                        "order_id": order_id,
+                        "client_order_id": client_order_id,
+                        "con_id": contract.get("conId"),
+                        "side": execution.get("side"),
+                        "shares": execution.get("shares"),
+                        "price": execution.get("price"),
+                        "trade_time": execution.get("time"),
+                    },
+                ),
+                "gateway_name": gateway_name,
+                "account_id": account_id,
+                "client_id": _text(execution.get("clientId")),
+                "strategy_id": "",
+                "client_order_id": client_order_id,
+                "trade_id": trade_id,
+                "order_id": order_id,
+                "trading_day": trading_day,
+                "exchange": exchange,
+                'account': account_id,
+                **contract,
+                'execution': execution,
                 'commission': (
                     self._object_data(fill.commissionReport)
                     if fill.commissionReport
