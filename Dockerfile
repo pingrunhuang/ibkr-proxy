@@ -10,6 +10,6 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev
 
 COPY src ./src
-RUN mkdir -p logs
+RUN mkdir -p logs data
 
 CMD ["uv", "run", "--no-sync", "python", "src/main.py"]

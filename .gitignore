@@ -7,3 +7,6 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal

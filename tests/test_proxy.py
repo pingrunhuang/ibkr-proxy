@@ -179,6 +179,7 @@ def proxy():
     try:
         yield instance
     finally:
+        instance.order_ownership.close()
         instance.pub_socket.close(0)
         instance.rep_socket.close(0)
         instance.context.term()
@@ -400,6 +401,87 @@ def test_on_exec_details_event_id_is_stable_and_changes_per_fill(proxy):
     assert published[2][1]["event_id"] != first_event_id
 
 
+def test_execution_recovers_strategy_ownership(proxy):
+    proxy.order_ownership.upsert(
+        client_order_id="silver-1",
+        broker_order_id="321",
+        client_id="engine-01",
+        strategy_id="SilverStrategy",
+        account_id="DU12345",
+    )
+    published = []
+
+    async def fake_publish(topic, data):
+        published.append((topic, data))
+
+    async def run_execution():
+        proxy.publish = fake_publish
+        fill = types.SimpleNamespace(
+            contract=silver_contract("20260827", 760200615, "SIQ6"),
+            execution=FakeExecution(),
+            commissionReport=None,
+        )
+        proxy.on_exec_details(types.SimpleNamespace(), fill)
+        await asyncio.sleep(0)
+
+    asyncio.run(run_execution())
+
+    data = published[0][1]
+    assert data["client_order_id"] == "silver-1"
+    assert data["client_id"] == "engine-01"
+    assert data["strategy_id"] == "SilverStrategy"
+
+
+def test_order_ownership_survives_store_restart(tmp_path):
+    path = tmp_path / "ownership.sqlite3"
+    first = proxy_module.OrderOwnershipStore(str(path))
+    first.upsert(
+        client_order_id="silver-1",
+        broker_order_id="321",
+        client_id="engine-01",
+        strategy_id="SilverStrategy",
+    )
+    first.close()
+
+    restarted = proxy_module.OrderOwnershipStore(str(path))
+    try:
+        assert restarted.find(broker_order_id="321")["strategy_id"] == "SilverStrategy"
+    finally:
+        restarted.close()
+
+
+def test_place_order_rejects_missing_engine_identity(proxy):
+    response = proxy._place_order_from_request({"symbol": "AAPL", "qty": 1})
+
+    assert response["status"] == "error"
+    assert "strategy_id" in response["message"]
+
+
+def test_duplicate_client_order_id_does_not_place_twice(proxy):
+    contract = silver_contract("20260827", 760200615, "SIQ6")
+    proxy._register_contract(contract, "FUT:SI:202608:COMEX:5000:SI")
+    fake_ib = FakeIBForProxyCommands()
+    proxy.ib = fake_ib
+    request = {
+        "con_id": 760200615,
+        "client_id": "engine-01",
+        "strategy_id": "SilverStrategy",
+        "client_order_id": "silver-duplicate",
+        "qty": 1,
+        "action_type": "BUY",
+        "order_type": "LMT",
+        "lmt_price": 38.0,
+    }
+
+    first = proxy._place_order_from_request(request)
+    repeated = proxy._place_order_from_request(request)
+
+    assert first["status"] == "success"
+    assert repeated["duplicate"] is True
+    assert repeated["client_order_id"] == "silver-duplicate"
+    assert len(fake_ib.placed_orders) == 1
+
+
 def test_place_order_with_conid_uses_registered_contract(proxy):
     contract = silver_contract("20260827", 760200615, "SIQ6")
     proxy._register_contract(contract, "FUT:SI:202608:COMEX:5000:SI")
@@ -408,13 +490,21 @@ def test_place_order_with_conid_uses_registered_contract(proxy):
 
     response = proxy._place_order_from_request({
         "con_id": 760200615,
+        "client_id": "engine-01",
+        "strategy_id": "SilverStrategy",
+        "client_order_id": "silver-1",
         "qty": 1,
         "action_type": "BUY",
         "order_type": "LMT",
         "lmt_price": 38.0,
     })
 
-    assert response == {"status": "success", "order_id": 987}
+    assert response == {
+        "status": "success",
+        "order_id": 987,
+        "broker_order_id": "987",
+        "client_order_id": "silver-1",
+    }
     placed_contract, placed_order = fake_ib.placed_orders[0]
     assert placed_contract is contract
     assert placed_order.action == "BUY"
@@ -422,6 +512,7 @@ def test_place_order_with_conid_uses_registered_contract(proxy):
     assert placed_order.orderType == "LMT"
     assert placed_order.lmtPrice == 38.0
     assert placed_order.tif == "DAY"
+    assert placed_order.orderRef == "silver-1"
 
 
 def test_place_order_uses_copy_with_normalized_registered_future_expiry(proxy):
@@ -436,13 +527,21 @@ def test_place_order_uses_copy_with_normalized_registered_future_expiry(proxy):
 
     response = proxy._place_order_from_request({
         "con_id": 361002937,
+        "client_id": "engine-01",
+        "strategy_id": "CoilStrategy",
+        "client_order_id": "coil-1",
         "qty": 1,
         "action_type": "SELL",
         "order_type": "LMT",
         "lmt_price": 80.38,
     })
 
-    assert response == {"status": "success", "order_id": 987}
+    assert response == {
+        "status": "success",
+        "order_id": 987,
+        "broker_order_id": "987",
+        "client_order_id": "coil-1",
+    }
     placed_contract, placed_order = fake_ib.placed_orders[0]
     assert placed_contract is not contract
     assert placed_contract.lastTradeDateOrContractMonth == "20260630"
@@ -453,6 +552,13 @@ def test_place_order_uses_copy_with_normalized_registered_future_expiry(proxy):
 
 
 def test_order_update_data_normalizes_trade(proxy):
+    proxy.order_ownership.upsert(
+        client_order_id="strategy-ref",
+        broker_order_id="321",
+        client_id="engine-01",
+        strategy_id="StockStrategy",
+        account_id="DU12345",
+    )
     trade = types.SimpleNamespace(
         contract=FakeStock("AAPL", "SMART", "USD"),
         order=FakeOrder(),
@@ -468,6 +574,10 @@ def test_order_update_data_normalizes_trade(proxy):
     assert data["account"] == "DU12345"
     assert data["order_id"] == 321
     assert data["orderRef"] == "strategy-ref"
+    assert data["client_order_id"] == "strategy-ref"
+    assert data["broker_order_id"] == "321"
+    assert data["client_id"] == "engine-01"
+    assert data["strategy_id"] == "StockStrategy"
     assert data["action"] == "BUY"
     assert data["status"] == "Submitted"
     assert data["filled"] == 4

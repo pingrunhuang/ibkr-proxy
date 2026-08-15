@@ -9,6 +9,7 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 from ib_async import IB, Event, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
+from order_ownership import OrderOwnershipStore
 
 
 def _text(value):
@@ -63,7 +64,15 @@ def _trade_event_id(
 
 
 class IBProxy:
-    def __init__(self, ib_host='127.0.0.1', ib_port=4001, client_id=1, zmq_port=5555, zmq_rep_port=5556):
+    def __init__(
+        self,
+        ib_host='127.0.0.1',
+        ib_port=4001,
+        client_id=1,
+        zmq_port=5555,
+        zmq_rep_port=5556,
+        ownership_db_path=":memory:",
+    ):
         self.ib_host = ib_host
         self.ib_port = ib_port
         self.client_id = client_id
@@ -84,6 +93,7 @@ class IBProxy:
         self.contracts_by_con_id = {}
         self.contracts_by_symbol_key = {}
         self.request_symbol_to_con_id = {}
+        self.order_ownership = OrderOwnershipStore(ownership_db_path)
 
     def _patch_ib_wrapper(self):
         """Patch the IB wrapper to emit custom events for sync completion."""
@@ -274,6 +284,12 @@ class IBProxy:
     def _order_update_data(self, trade):
         order = trade.order
         status = trade.orderStatus
+        client_order_id = str(getattr(order, 'orderRef', '') or '')
+        broker_order_id = str(getattr(order, 'orderId', '') or '')
+        owner = self.order_ownership.find(
+            client_order_id=client_order_id,
+            broker_order_id=broker_order_id,
+        ) or {}
         data = {
             **self._contract_data(trade.contract),
             'account': getattr(order, 'account', ''),
@@ -281,6 +297,11 @@ class IBProxy:
             'permId': getattr(order, 'permId', 0),
             'clientId': getattr(order, 'clientId', 0),
             'orderRef': getattr(order, 'orderRef', ''),
+            'client_order_id': owner.get('client_order_id', client_order_id),
+            'broker_order_id': broker_order_id,
+            'account_id': owner.get('account_id') or getattr(order, 'account', ''),
+            'client_id': owner.get('client_id', ''),
+            'strategy_id': owner.get('strategy_id', ''),
             'action': getattr(order, 'action', ''),
             'orderType': getattr(order, 'orderType', ''),
             'lmtPrice': getattr(order, 'lmtPrice', 0.0),
@@ -326,6 +347,11 @@ class IBProxy:
             trade_id = _text(execution.get("execId"))
             order_id = _text(execution.get("orderId"))
             client_order_id = _text(execution.get("orderRef"))
+            owner = self.order_ownership.find(
+                client_order_id=client_order_id,
+                broker_order_id=order_id,
+            ) or {}
+            client_order_id = owner.get("client_order_id", client_order_id)
             topic = f"executions.{account_id}"
             data = {
                 "event_id": _trade_event_id(
@@ -346,8 +372,8 @@ class IBProxy:
                 ),
                 "gateway_name": gateway_name,
                 "account_id": account_id,
-                "client_id": _text(execution.get("clientId")),
-                "strategy_id": "",
+                "client_id": owner.get("client_id", ""),
+                "strategy_id": owner.get("strategy_id", ""),
                 "client_order_id": client_order_id,
                 "trade_id": trade_id,
                 "order_id": order_id,
@@ -603,6 +629,42 @@ class IBProxy:
         return None
 
     def _place_order_from_request(self, req):
+        client_id = _text(req.get("client_id"))
+        strategy_id = _text(req.get("strategy_id"))
+        client_order_id = _text(req.get("client_order_id"))
+        if not client_id or not strategy_id or not client_order_id:
+            return {
+                "status": "error",
+                "message": (
+                    "place_order requires client_id, strategy_id, and "
+                    "client_order_id"
+                ),
+            }
+        existing_owner = self.order_ownership.find(
+            client_order_id=client_order_id
+        )
+        if existing_owner:
+            if (
+                existing_owner["client_id"] != client_id
+                or existing_owner["strategy_id"] != strategy_id
+            ):
+                return {
+                    "status": "error",
+                    "message": "client_order_id ownership mismatch",
+                }
+            if existing_owner["broker_order_id"]:
+                return {
+                    "status": "success",
+                    "duplicate": True,
+                    "order_id": existing_owner["broker_order_id"],
+                    "broker_order_id": existing_owner["broker_order_id"],
+                    "client_order_id": client_order_id,
+                }
+            return {
+                "status": "error",
+                "recovery_required": True,
+                "message": "client_order_id has a pending broker submission",
+            }
         contract = self._contract_for_order_request(req)
         if not contract:
             return {"status": "error", "message": "Invalid contract type"}
@@ -610,6 +672,13 @@ class IBProxy:
         order = self._order_from_request(req)
         if not order:
             return {"status": "error", "message": "Invalid order type"}
+        order.orderRef = client_order_id
+        self.order_ownership.reserve(
+            client_order_id=client_order_id,
+            client_id=client_id,
+            strategy_id=strategy_id,
+            account_id=_text(req.get("account_id")),
+        )
 
         metadata = self._contract_metadata(contract) if getattr(contract, 'conId', 0) else self._contract_data(contract)
         logger.info(
@@ -622,7 +691,50 @@ class IBProxy:
             f"lmt_price={req.get('lmt_price', '')}"
         )
         trade = self.ib.placeOrder(contract, order)
-        return {"status": "success", "order_id": trade.order.orderId}
+        broker_order_id = str(trade.order.orderId)
+        self.order_ownership.upsert(
+            client_order_id=client_order_id,
+            broker_order_id=broker_order_id,
+            client_id=client_id,
+            strategy_id=strategy_id,
+            account_id=_text(req.get("account_id")),
+        )
+        return {
+            "status": "success",
+            "order_id": trade.order.orderId,
+            "broker_order_id": broker_order_id,
+            "client_order_id": client_order_id,
+        }
+
+    def _cancel_order_from_request(self, req):
+        client_order_id = _text(req.get("client_order_id"))
+        broker_order_id = _text(req.get("broker_order_id") or req.get("order_id"))
+        owner = self.order_ownership.find(
+            client_order_id=client_order_id,
+            broker_order_id=broker_order_id,
+        )
+        if not owner:
+            return {"status": "error", "message": "Order ownership not found"}
+        broker_order_id = owner["broker_order_id"] or broker_order_id
+        if _text(req.get("client_id")) != owner["client_id"]:
+            return {"status": "error", "message": "Order client_id mismatch"}
+        if _text(req.get("strategy_id")) != owner["strategy_id"]:
+            return {"status": "error", "message": "Order strategy_id mismatch"}
+        if not broker_order_id:
+            return {"status": "error", "message": "Broker order id not available"}
+
+        trades = [
+            trade
+            for trade in self.ib.trades()
+            if str(trade.order.orderId) == broker_order_id
+        ]
+        if not trades:
+            return {"status": "error", "message": "Order not found"}
+        self.ib.cancelOrder(trades[0].order)
+        return {
+            "status": "success",
+            "message": f"Order {broker_order_id} cancellation requested",
+        }
 
     def subscribe_pnl(self, account, contracts=None):
         """Subscribe to PnL updates."""
@@ -663,14 +775,7 @@ class IBProxy:
                         response = self._place_order_from_request(req)
                             
                     elif action == 'cancel_order':
-                        order_id = req.get('order_id')
-                        # Find the trade in current trades
-                        trades = [t for t in self.ib.trades() if str(t.order.orderId) == str(order_id)]
-                        if trades:
-                            self.ib.cancelOrder(trades[0].order)
-                            response = {"status": "success", "message": f"Order {order_id} cancellation requested"}
-                        else:
-                            response = {"status": "error", "message": "Order not found"}
+                        response = self._cancel_order_from_request(req)
                             
                     elif action == 'get_positions':
                         positions = []
@@ -768,4 +873,5 @@ class IBProxy:
         self.pub_socket.close()
         self.rep_socket.close()
         self.context.term()
+        self.order_ownership.close()
         logger.info("Proxy stopped.")

@@ -17,6 +17,14 @@ async def main():
     parser.add_argument('--zmq-port', type=int, default=int(os.getenv('ZMQ_PUB_PORT', 5555)), help='ZeroMQ PUB port')
     parser.add_argument('--zmq-rep-port', type=int, default=int(os.getenv('ZMQ_REP_PORT', 5556)), help='ZeroMQ REP port for commands')
     parser.add_argument('--symbols', default=os.getenv('IB_SYMBOLS', 'AAPL,TSLA,SPY'), help='Comma-separated symbols to subscribe to')
+    parser.add_argument(
+        '--ownership-db-path',
+        default=os.getenv(
+            'IB_ORDER_OWNERSHIP_DB_PATH',
+            'data/ib_order_ownership.sqlite3',
+        ),
+        help='SQLite path for durable Engine order ownership',
+    )
     
     args = parser.parse_args()
     
@@ -25,7 +33,8 @@ async def main():
         ib_port=args.ib_port,
         client_id=args.client_id,
         zmq_port=args.zmq_port,
-        zmq_rep_port=args.zmq_rep_port
+        zmq_rep_port=args.zmq_rep_port,
+        ownership_db_path=args.ownership_db_path,
     )
     
     try:
