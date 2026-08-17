@@ -446,11 +446,24 @@ def test_order_ownership_survives_store_restart(tmp_path):
         client_id="engine-01",
         strategy_id="SilverStrategy",
     )
+    trade = {
+        "event_id": "trade:ib_proxy:1",
+        "client_id": "engine-01",
+        "strategy_id": "SilverStrategy",
+        "account_id": "DU12345",
+        "trading_day": "20260814",
+        "trade_id": "EXEC-1",
+    }
+    assert first.record_trade(trade)
+    assert not first.record_trade(trade)
     first.close()
 
     restarted = proxy_module.OrderOwnershipStore(str(path))
     try:
         assert restarted.find(broker_order_id="321")["strategy_id"] == "SilverStrategy"
+        page = restarted.list_trades("engine-01", "SilverStrategy")
+        assert page["trades"] == [trade]
+        assert page["has_more"] is False
     finally:
         restarted.close()
 

@@ -416,6 +416,13 @@ class IBProxy:
                     else None
                 )
             }
+            inserted = self.order_ownership.record_trade(data)
+            logger.debug(
+                "Persisted IB trade event_id={} strategy_id={} inserted={}",
+                data["event_id"],
+                data["strategy_id"],
+                inserted,
+            )
             asyncio.create_task(self.publish(topic, data))
         except Exception:
             logger.exception("Failed to publish IB execution details")
@@ -863,6 +870,7 @@ class IBProxy:
                             "status": "success",
                             "message": "pong",
                             "ib_connected": bool(self.ib.isConnected()),
+                            "database_ready": self.order_ownership.is_healthy(),
                         }
 
                     elif action == 'place_order':
@@ -897,6 +905,36 @@ class IBProxy:
                     elif action == 'get_orders':
                         orders = [self._order_update_data(t) for t in self.ib.trades()]
                         response = {"status": "success", "data": orders}
+
+                    elif action == 'get_trades':
+                        client_id = _text(req.get("client_id"))
+                        strategy_id = _text(req.get("strategy_id"))
+                        if not client_id or not strategy_id:
+                            response = {
+                                "status": "error",
+                                "message": "get_trades requires client_id and strategy_id",
+                            }
+                        else:
+                            try:
+                                after_id = int(req.get("after_id") or 0)
+                                limit = int(req.get("limit") or 500)
+                                if after_id < 0 or limit <= 0 or limit > 1000:
+                                    raise ValueError
+                            except (TypeError, ValueError):
+                                response = {
+                                    "status": "error",
+                                    "message": "invalid get_trades pagination",
+                                }
+                            else:
+                                response = {
+                                    "status": "success",
+                                    "data": self.order_ownership.list_trades(
+                                        client_id,
+                                        strategy_id,
+                                        after_id=after_id,
+                                        limit=limit,
+                                    ),
+                                }
 
                     elif action == 'qualify_contracts':
                         symbols = req.get('symbols', [])

@@ -136,6 +136,7 @@ Send JSON requests to `tcp://<host>:5556`:
 - `{"action": "ping"}`
 - `{"action": "get_positions"}`
 - `{"action": "get_orders"}`
+- `{"action": "get_trades", "client_id": "multi-market-engine", "strategy_id": "GcStrategy", "after_id": 0, "limit": 500}`
 - `{"action": "qualify_contracts", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
 - `{"action": "subscribe_market_data", "symbols": ["CASH.USD.CNH.IDEALPRO"]}`
 - `{"action": "subscribe_market_data", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
@@ -143,6 +144,10 @@ Send JSON requests to `tcp://<host>:5556`:
 - `{"action": "place_order", "con_id": 760200615, "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 38.0}`
 - `{"action": "place_order", "sec_type": "STK", "symbol": "AAPL", "exchange": "SMART", "currency": "USD", "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 100.0}`
 - `{"action": "cancel_order", "order_id": 123}`
+
+Execution payloads are written to the ownership SQLite database before PUB delivery.
+`get_trades` is owner-scoped and cursor-paginated so the Engine can replay fills after
+startup or reconnect; Engine-side `event_id` processing remains idempotent.
 
 `qualify_contracts` resolves readable symbols without subscribing. `subscribe_market_data` resolves and subscribes. Both return contract metadata with the ZMQ topic:
 ```json

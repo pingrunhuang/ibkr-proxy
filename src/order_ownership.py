@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -28,6 +29,27 @@ class OrderOwnershipStore:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ib_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                client_id TEXT NOT NULL DEFAULT '',
+                strategy_id TEXT NOT NULL DEFAULT '',
+                account_id TEXT NOT NULL DEFAULT '',
+                trading_day TEXT NOT NULL DEFAULT '',
+                trade_id TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL,
+                received_at TEXT NOT NULL
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ib_trades_owner_cursor
+            ON ib_trades(client_id, strategy_id, id)
             """
         )
         self.connection.commit()
@@ -127,6 +149,66 @@ class OrderOwnershipStore:
             if row:
                 return dict(row)
         return None
+
+    def record_trade(self, payload: dict) -> bool:
+        event_id = str(payload.get("event_id") or "").strip()
+        if not event_id:
+            raise ValueError("trade payload requires event_id")
+        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO ib_trades(
+                event_id, client_id, strategy_id, account_id,
+                trading_day, trade_id, payload_json, received_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                str(payload.get("client_id") or ""),
+                str(payload.get("strategy_id") or ""),
+                str(payload.get("account_id") or ""),
+                str(payload.get("trading_day") or ""),
+                str(payload.get("trade_id") or ""),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
+                now,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount > 0
+
+    def list_trades(
+        self,
+        client_id: str,
+        strategy_id: str,
+        *,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> dict:
+        page_size = min(max(int(limit), 1), 1000)
+        cursor = max(int(after_id), 0)
+        rows = self.connection.execute(
+            """
+            SELECT id, payload_json
+            FROM ib_trades
+            WHERE client_id = ? AND strategy_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (client_id, strategy_id, cursor, page_size + 1),
+        ).fetchall()
+        has_more = len(rows) > page_size
+        page = rows[:page_size]
+        return {
+            "trades": [json.loads(row["payload_json"]) for row in page],
+            "next_after_id": int(page[-1]["id"]) if page else cursor,
+            "has_more": has_more,
+        }
+
+    def is_healthy(self) -> bool:
+        try:
+            return self.connection.execute("SELECT 1").fetchone()[0] == 1
+        except sqlite3.Error:
+            return False
 
     def close(self) -> None:
         self.connection.close()
