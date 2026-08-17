@@ -3,6 +3,7 @@ import importlib
 import sys
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -401,7 +402,9 @@ def test_on_exec_details_event_id_is_stable_and_changes_per_fill(proxy):
     assert published[2][1]["event_id"] != first_event_id
 
 
-def test_execution_recovers_strategy_ownership(proxy):
+def test_execution_recovers_strategy_ownership(proxy, monkeypatch):
+    test_logger = MagicMock()
+    monkeypatch.setattr(proxy_module, "logger", test_logger)
     proxy.order_ownership.upsert(
         client_order_id="silver-1",
         broker_order_id="321",
@@ -430,6 +433,8 @@ def test_execution_recovers_strategy_ownership(proxy):
     assert data["client_order_id"] == "silver-1"
     assert data["client_id"] == "engine-01"
     assert data["strategy_id"] == "SilverStrategy"
+    test_logger.debug.assert_called()
+    test_logger.error.assert_not_called()
 
 
 def test_order_ownership_survives_store_restart(tmp_path):
@@ -450,11 +455,14 @@ def test_order_ownership_survives_store_restart(tmp_path):
         restarted.close()
 
 
-def test_place_order_rejects_missing_engine_identity(proxy):
+def test_place_order_rejects_missing_engine_identity(proxy, monkeypatch):
+    test_logger = MagicMock()
+    monkeypatch.setattr(proxy_module, "logger", test_logger)
     response = proxy._place_order_from_request({"symbol": "AAPL", "qty": 1})
 
     assert response["status"] == "error"
     assert "strategy_id" in response["message"]
+    test_logger.error.assert_called_once()
 
 
 def test_duplicate_client_order_id_does_not_place_twice(proxy):

@@ -94,6 +94,10 @@ class IBProxy:
         self.contracts_by_symbol_key = {}
         self.request_symbol_to_con_id = {}
         self.order_ownership = OrderOwnershipStore(ownership_db_path)
+        self._unresolved_order_ids_logged = set()
+        logger.info(
+            f"IB order ownership store initialized path={ownership_db_path}"
+        )
 
     def _patch_ib_wrapper(self):
         """Patch the IB wrapper to emit custom events for sync completion."""
@@ -290,6 +294,15 @@ class IBProxy:
             client_order_id=client_order_id,
             broker_order_id=broker_order_id,
         ) or {}
+        if not owner:
+            unresolved_key = client_order_id or broker_order_id
+            if unresolved_key and unresolved_key not in self._unresolved_order_ids_logged:
+                self._unresolved_order_ids_logged.add(unresolved_key)
+                logger.warning(
+                    "IB order ownership unresolved "
+                    f"client_order_id={client_order_id or '<empty>'} "
+                    f"broker_order_id={broker_order_id or '<empty>'}"
+                )
         data = {
             **self._contract_data(trade.contract),
             'account': getattr(order, 'account', ''),
@@ -352,6 +365,21 @@ class IBProxy:
                 broker_order_id=order_id,
             ) or {}
             client_order_id = owner.get("client_order_id", client_order_id)
+            if owner:
+                logger.debug(
+                    "Recovered IB execution ownership "
+                    f"strategy_id={owner['strategy_id']} "
+                    f"client_id={owner['client_id']} "
+                    f"client_order_id={client_order_id} "
+                    f"broker_order_id={order_id} trade_id={trade_id}"
+                )
+            else:
+                logger.error(
+                    "IB execution ownership unresolved; Engine will quarantine "
+                    f"client_order_id={client_order_id or '<empty>'} "
+                    f"broker_order_id={order_id or '<empty>'} "
+                    f"trade_id={trade_id} account_id={account_id}"
+                )
             topic = f"executions.{account_id}"
             data = {
                 "event_id": _trade_event_id(
@@ -633,6 +661,12 @@ class IBProxy:
         strategy_id = _text(req.get("strategy_id"))
         client_order_id = _text(req.get("client_order_id"))
         if not client_id or not strategy_id or not client_order_id:
+            logger.error(
+                "Rejected IB place_order with missing Engine identity "
+                f"client_id={client_id or '<empty>'} "
+                f"strategy_id={strategy_id or '<empty>'} "
+                f"client_order_id={client_order_id or '<empty>'}"
+            )
             return {
                 "status": "error",
                 "message": (
@@ -648,11 +682,25 @@ class IBProxy:
                 existing_owner["client_id"] != client_id
                 or existing_owner["strategy_id"] != strategy_id
             ):
+                logger.error(
+                    "Rejected duplicate IB client_order_id ownership mismatch "
+                    f"client_order_id={client_order_id} "
+                    f"stored_client_id={existing_owner['client_id']} "
+                    f"incoming_client_id={client_id} "
+                    f"stored_strategy_id={existing_owner['strategy_id']} "
+                    f"incoming_strategy_id={strategy_id}"
+                )
                 return {
                     "status": "error",
                     "message": "client_order_id ownership mismatch",
                 }
             if existing_owner["broker_order_id"]:
+                logger.warning(
+                    "Returning existing IB order for duplicate request "
+                    f"strategy_id={strategy_id} "
+                    f"client_order_id={client_order_id} "
+                    f"broker_order_id={existing_owner['broker_order_id']}"
+                )
                 return {
                     "status": "success",
                     "duplicate": True,
@@ -660,6 +708,10 @@ class IBProxy:
                     "broker_order_id": existing_owner["broker_order_id"],
                     "client_order_id": client_order_id,
                 }
+            logger.error(
+                "IB order submission requires reconciliation "
+                f"strategy_id={strategy_id} client_order_id={client_order_id}"
+            )
             return {
                 "status": "error",
                 "recovery_required": True,
@@ -678,6 +730,11 @@ class IBProxy:
             client_id=client_id,
             strategy_id=strategy_id,
             account_id=_text(req.get("account_id")),
+        )
+        logger.debug(
+            "Reserved IB order ownership before broker submission "
+            f"strategy_id={strategy_id} client_id={client_id} "
+            f"client_order_id={client_order_id}"
         )
 
         metadata = self._contract_metadata(contract) if getattr(contract, 'conId', 0) else self._contract_data(contract)
@@ -699,6 +756,12 @@ class IBProxy:
             strategy_id=strategy_id,
             account_id=_text(req.get("account_id")),
         )
+        logger.info(
+            "Persisted IB order ownership after broker acceptance "
+            f"strategy_id={strategy_id} client_id={client_id} "
+            f"client_order_id={client_order_id} "
+            f"broker_order_id={broker_order_id}"
+        )
         return {
             "status": "success",
             "order_id": trade.order.orderId,
@@ -714,13 +777,34 @@ class IBProxy:
             broker_order_id=broker_order_id,
         )
         if not owner:
+            logger.error(
+                "Rejected IB cancel_order: ownership not found "
+                f"client_order_id={client_order_id or '<empty>'} "
+                f"broker_order_id={broker_order_id or '<empty>'}"
+            )
             return {"status": "error", "message": "Order ownership not found"}
         broker_order_id = owner["broker_order_id"] or broker_order_id
         if _text(req.get("client_id")) != owner["client_id"]:
+            logger.error(
+                "Rejected IB cancel_order: client_id mismatch "
+                f"client_order_id={owner['client_order_id']} "
+                f"stored_client_id={owner['client_id']} "
+                f"incoming_client_id={_text(req.get('client_id')) or '<empty>'}"
+            )
             return {"status": "error", "message": "Order client_id mismatch"}
         if _text(req.get("strategy_id")) != owner["strategy_id"]:
+            logger.error(
+                "Rejected IB cancel_order: strategy_id mismatch "
+                f"client_order_id={owner['client_order_id']} "
+                f"stored_strategy_id={owner['strategy_id']} "
+                f"incoming_strategy_id={_text(req.get('strategy_id')) or '<empty>'}"
+            )
             return {"status": "error", "message": "Order strategy_id mismatch"}
         if not broker_order_id:
+            logger.error(
+                "Rejected IB cancel_order: broker order id unavailable "
+                f"client_order_id={owner['client_order_id']}"
+            )
             return {"status": "error", "message": "Broker order id not available"}
 
         trades = [
@@ -729,8 +813,19 @@ class IBProxy:
             if str(trade.order.orderId) == broker_order_id
         ]
         if not trades:
+            logger.error(
+                "Rejected IB cancel_order: active broker order not found "
+                f"client_order_id={owner['client_order_id']} "
+                f"broker_order_id={broker_order_id}"
+            )
             return {"status": "error", "message": "Order not found"}
         self.ib.cancelOrder(trades[0].order)
+        logger.info(
+            "Submitted IB cancel_order "
+            f"strategy_id={owner['strategy_id']} "
+            f"client_order_id={owner['client_order_id']} "
+            f"broker_order_id={broker_order_id}"
+        )
         return {
             "status": "success",
             "message": f"Order {broker_order_id} cancellation requested",
@@ -746,7 +841,7 @@ class IBProxy:
     async def publish(self, topic, data):
         """Publish data to ZeroMQ."""
         message = json.dumps(data, default=str)
-        logger.info(f"Publishing ZMQ topic={topic} payload={message}")
+        logger.debug(f"Publishing ZMQ topic={topic} payload={message}")
         await self.pub_socket.send_string(f"{topic} {message}")
         logger.debug(f"Published ZMQ topic={topic}")
 
