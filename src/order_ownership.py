@@ -150,7 +150,7 @@ class OrderOwnershipStore:
                 return dict(row)
         return None
 
-    def record_trade(self, payload: dict) -> bool:
+    def record_trade(self, payload: dict) -> int | None:
         event_id = str(payload.get("event_id") or "").strip()
         if not event_id:
             raise ValueError("trade payload requires event_id")
@@ -174,7 +174,7 @@ class OrderOwnershipStore:
             ),
         )
         self.connection.commit()
-        return cursor.rowcount > 0
+        return int(cursor.lastrowid) if cursor.rowcount > 0 else None
 
     def list_trades(
         self,
@@ -199,10 +199,27 @@ class OrderOwnershipStore:
         has_more = len(rows) > page_size
         page = rows[:page_size]
         return {
-            "trades": [json.loads(row["payload_json"]) for row in page],
+            "trades": [
+                {
+                    **json.loads(row["payload_json"]),
+                    "trade_cursor": int(row["id"]),
+                }
+                for row in page
+            ],
             "next_after_id": int(page[-1]["id"]) if page else cursor,
             "has_more": has_more,
         }
+
+    def latest_trade_cursor(self, client_id: str, strategy_id: str) -> int:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(MAX(id), 0) AS cursor
+            FROM ib_trades
+            WHERE client_id = ? AND strategy_id = ?
+            """,
+            (client_id, strategy_id),
+        ).fetchone()
+        return int(row["cursor"])
 
     def is_healthy(self) -> bool:
         try:

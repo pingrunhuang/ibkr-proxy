@@ -416,13 +416,17 @@ class IBProxy:
                     else None
                 )
             }
-            inserted = self.order_ownership.record_trade(data)
+            trade_cursor = self.order_ownership.record_trade(data)
             logger.debug(
-                "Persisted IB trade event_id={} strategy_id={} inserted={}",
+                "Persisted IB trade event_id={} strategy_id={} trade_cursor={}",
                 data["event_id"],
                 data["strategy_id"],
-                inserted,
+                trade_cursor,
             )
+            if not trade_cursor:
+                logger.debug("Skip duplicate IB trade event_id={}", data["event_id"])
+                return
+            data["trade_cursor"] = int(trade_cursor)
             asyncio.create_task(self.publish(topic, data))
         except Exception:
             logger.exception("Failed to publish IB execution details")
@@ -935,6 +939,25 @@ class IBProxy:
                                         limit=limit,
                                     ),
                                 }
+
+                    elif action == 'get_trade_cursor':
+                        client_id = _text(req.get("client_id"))
+                        strategy_id = _text(req.get("strategy_id"))
+                        if not client_id or not strategy_id:
+                            response = {
+                                "status": "error",
+                                "message": "get_trade_cursor requires client_id and strategy_id",
+                            }
+                        else:
+                            response = {
+                                "status": "success",
+                                "data": {
+                                    "cursor": self.order_ownership.latest_trade_cursor(
+                                        client_id,
+                                        strategy_id,
+                                    )
+                                },
+                            }
 
                     elif action == 'qualify_contracts':
                         symbols = req.get('symbols', [])

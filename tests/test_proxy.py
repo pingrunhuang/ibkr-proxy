@@ -396,10 +396,10 @@ def test_on_exec_details_event_id_is_stable_and_changes_per_fill(proxy):
 
     asyncio.run(run_executions())
 
-    assert len(published) == 3
+    assert len(published) == 2
     first_event_id = published[0][1]["event_id"]
-    assert published[1][1]["event_id"] == first_event_id
-    assert published[2][1]["event_id"] != first_event_id
+    assert published[1][1]["event_id"] != first_event_id
+    assert published[0][1]["trade_cursor"] < published[1][1]["trade_cursor"]
 
 
 def test_execution_recovers_strategy_ownership(proxy, monkeypatch):
@@ -462,8 +462,9 @@ def test_order_ownership_survives_store_restart(tmp_path):
     try:
         assert restarted.find(broker_order_id="321")["strategy_id"] == "SilverStrategy"
         page = restarted.list_trades("engine-01", "SilverStrategy")
-        assert page["trades"] == [trade]
+        assert page["trades"] == [{**trade, "trade_cursor": 1}]
         assert page["has_more"] is False
+        assert restarted.latest_trade_cursor("engine-01", "SilverStrategy") == 1
     finally:
         restarted.close()
 
