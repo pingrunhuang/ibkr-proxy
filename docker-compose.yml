@@ -43,6 +43,7 @@ services:
       - ZMQ_PUB_PORT=${ZMQ_PUB_PORT:-5555}
       - ZMQ_REP_PORT=${ZMQ_REP_PORT:-5556}
       - IB_SYMBOLS=${IB_SYMBOLS:-AAPL,FX:USDCNH,CRYPTO:BTC}
+      - IB_ENABLE_MD=${IB_ENABLE_MD:-true}
       - IB_ORDER_OWNERSHIP_DB_PATH=/app/data/ib_order_ownership.sqlite3
     ports:
       - "${ZMQ_PUB_PORT:-5555}:5555"

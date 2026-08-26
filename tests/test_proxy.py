@@ -620,3 +620,15 @@ def test_subscribe_market_data_requests_each_contract(proxy):
     proxy.subscribe_market_data(contracts)
 
     assert fake_ib.market_data_requests == contracts
+
+
+def test_disabled_market_data_rejects_subscriptions():
+    instance = proxy_module.IBProxy(enable_md=False)
+    try:
+        with pytest.raises(RuntimeError, match="IB_ENABLE_MD=false"):
+            instance.subscribe_market_data([])
+    finally:
+        instance.order_ownership.close()
+        instance.pub_socket.close(0)
+        instance.rep_socket.close(0)
+        instance.context.term()

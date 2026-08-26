@@ -72,12 +72,14 @@ class IBProxy:
         zmq_port=5555,
         zmq_rep_port=5556,
         ownership_db_path=":memory:",
+        enable_md=True,
     ):
         self.ib_host = ib_host
         self.ib_port = ib_port
         self.client_id = client_id
         self.zmq_port = zmq_port
         self.zmq_rep_port = zmq_rep_port
+        self.enable_md = bool(enable_md)
         
         self.ib = IB()
         # Manually add missing events from ib_async
@@ -132,7 +134,8 @@ class IBProxy:
 
     def setup_event_handlers(self):
         """Setup IB event handlers for various data types."""
-        self.ib.pendingTickersEvent += self.on_pending_tickers
+        if self.enable_md:
+            self.ib.pendingTickersEvent += self.on_pending_tickers
         self.ib.accountValueEvent += self.on_account_value
         self.ib.positionEvent += self.on_position
         self.ib.positionEndEvent += self.on_position_end
@@ -444,6 +447,8 @@ class IBProxy:
 
     def subscribe_market_data(self, contracts):
         """Subscribe to real-time market data for a list of contracts."""
+        if not self.enable_md:
+            raise RuntimeError("IB market data is disabled by IB_ENABLE_MD=false")
         for contract in contracts:
             metadata = self._contract_metadata(contract)
             logger.info(
@@ -875,6 +880,7 @@ class IBProxy:
                             "message": "pong",
                             "ib_connected": bool(self.ib.isConnected()),
                             "database_ready": self.order_ownership.is_healthy(),
+                            "md_enabled": self.enable_md,
                         }
 
                     elif action == 'place_order':
@@ -972,18 +978,24 @@ class IBProxy:
                             }
 
                     elif action == 'subscribe_market_data':
-                        symbols = req.get('symbols', [])
-                        contract_requests = req.get('contracts', [])
-                        if not isinstance(symbols, list) or not isinstance(contract_requests, list):
-                            response = {"status": "error", "message": "symbols and contracts must be lists"}
-                        else:
-                            qualified = await self.qualify_contracts(symbols, contract_requests)
-                            qualified_contracts = [r['contract'] for r in qualified]
-                            self.subscribe_market_data(qualified_contracts)
+                        if not self.enable_md:
                             response = {
-                                "status": "success",
-                                "data": [r['metadata'] for r in qualified]
+                                "status": "error",
+                                "message": "IB market data is disabled by IB_ENABLE_MD=false",
                             }
+                        else:
+                            symbols = req.get('symbols', [])
+                            contract_requests = req.get('contracts', [])
+                            if not isinstance(symbols, list) or not isinstance(contract_requests, list):
+                                response = {"status": "error", "message": "symbols and contracts must be lists"}
+                            else:
+                                qualified = await self.qualify_contracts(symbols, contract_requests)
+                                qualified_contracts = [r['contract'] for r in qualified]
+                                self.subscribe_market_data(qualified_contracts)
+                                response = {
+                                    "status": "success",
+                                    "data": [r['metadata'] for r in qualified]
+                                }
                         
                     await self.rep_socket.send_json(response)
             except Exception as e:

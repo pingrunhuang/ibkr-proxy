@@ -30,6 +30,7 @@ Edit `.env`:
 - `TWS_PASSWORD`: Your IBKR password
 - `TRADING_MODE`: `paper` (highly recommended for testing)
 - `IB_SYMBOLS`: optional comma-separated startup subscriptions.
+- `IB_ENABLE_MD`: set to `false` to disable startup and runtime market-data subscriptions. IB market data and trading still share one Gateway connection.
 - `ZMQ_PUB_PORT`: market-data/event publish port, default `5555`.
 - `ZMQ_REP_PORT`: command port, default `5556`.
 
@@ -59,6 +60,7 @@ IB_CLIENT_ID=99
 
 # Initial market data subscriptions for proxy startup.
 # Runtime subscriptions can also be requested via the subscribe_market_data command.
+IB_ENABLE_MD=true
 # Ambiguous futures such as COMEX silver need a multiplier or trading class.
 # Example standard silver: FUT:SI:202608:COMEX:5000:SI
 # Example mini silver: FUT:SI:202608:COMEX:1000:SIL
