@@ -881,6 +881,7 @@ class IBProxy:
                             "ib_connected": bool(self.ib.isConnected()),
                             "database_ready": self.order_ownership.is_healthy(),
                             "md_enabled": self.enable_md,
+                            "td_enabled": True,
                         }
 
                     elif action == 'place_order':
