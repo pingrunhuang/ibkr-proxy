@@ -42,7 +42,7 @@ services:
       - IB_CLIENT_ID=${IB_CLIENT_ID:-99}
       - ZMQ_PUB_PORT=${ZMQ_PUB_PORT:-5555}
       - ZMQ_REP_PORT=${ZMQ_REP_PORT:-5556}
-      - IB_SYMBOLS=${IB_SYMBOLS:-AAPL,FX:USDCNH,CRYPTO:BTC}
+      - IB_SYMBOLS=${IB_SYMBOLS:-CASH.USD.CNH.IDEALPRO,FUT:SI:202608:COMEX:5000:SI}
       - IB_ENABLE_MD=${IB_ENABLE_MD:-true}
       - IB_ORDER_OWNERSHIP_DB_PATH=/app/data/ib_order_ownership.sqlite3
     ports:

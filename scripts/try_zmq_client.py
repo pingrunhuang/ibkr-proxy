@@ -2,7 +2,7 @@ import zmq
 import json
 import sys
 
-def test_command(action, params=None):
+def send_command(action, params=None):
     context = zmq.Context()
     socket = context.socket(zmq.REQ)
     socket.connect("tcp://127.0.0.1:5556")
@@ -26,4 +26,4 @@ if __name__ == "__main__":
         print("Usage: python test_zmq_client.py <action>")
         sys.exit(1)
     
-    test_command(sys.argv[1])
+    send_command(sys.argv[1])

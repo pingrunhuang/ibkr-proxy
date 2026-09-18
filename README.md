@@ -64,7 +64,7 @@ IB_ENABLE_MD=true
 # Ambiguous futures such as COMEX silver need a multiplier or trading class.
 # Example standard silver: FUT:SI:202608:COMEX:5000:SI
 # Example mini silver: FUT:SI:202608:COMEX:1000:SIL
-IB_SYMBOLS=AAPL,FX:USDCNH,CRYPTO:BTC
+IB_SYMBOLS=FX:USDCNH,FUT:SI:202608:COMEX:5000:SI
 
 # ZeroMQ ports exposed by the proxy.
 ZMQ_PUB_PORT=5555
@@ -111,8 +111,8 @@ uv sync
 
 ### 5. Run the Proxy Locally
 ```bash
-# Example: Subscribe to stocks, forex, and crypto
-uv run src/main.py --symbols "AAPL,FX:USDCNH,CRYPTO:BTC"
+# Example: Subscribe to forex and futures
+uv run src/main.py --symbols "FX:USDCNH,FUT:SI:202608:COMEX:5000:SI"
 ```
 
 ### 6. Test with a Consumer
@@ -142,9 +142,7 @@ Send JSON requests to `tcp://<host>:5556`:
 - `{"action": "qualify_contracts", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
 - `{"action": "subscribe_market_data", "symbols": ["CASH.USD.CNH.IDEALPRO"]}`
 - `{"action": "subscribe_market_data", "symbols": ["FUT:SI:202608:COMEX:5000:SI"]}`
-- `{"action": "subscribe_market_data", "contracts": [{"sec_type": "FUT", "symbol": "SI", "exchange": "COMEX", "currency": "USD", "expiry": "202608", "multiplier": "5000", "trading_class": "SI"}]}`
 - `{"action": "place_order", "con_id": 760200615, "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 38.0}`
-- `{"action": "place_order", "sec_type": "STK", "symbol": "AAPL", "exchange": "SMART", "currency": "USD", "qty": 1, "action_type": "BUY", "order_type": "LMT", "lmt_price": 100.0}`
 - `{"action": "cancel_order", "order_id": 123}`
 
 Execution payloads are written to the ownership SQLite database before PUB delivery.
@@ -172,12 +170,9 @@ startup or reconnect; Engine-side `event_id` processing remains idempotent.
 If `place_order` includes `con_id`, the proxy looks up the qualified contract in its local registry and sends IB a conId-only contract (`conId` plus `exchange`). `subscribe_market_data` does the same after qualification. That keeps ICE Brent last-trade timestamps out of `reqMktData` / `placeOrder` while `.env` symbols stay human-readable.
 
 Supported symbol formats for `subscribe_market_data` include:
-- `AAPL`
-- `STK.AAPL.USD.SMART`
 - `CASH.USD.CNH.IDEALPRO`
-- `FUT.ES.USD.CME.202609`
 - `FX:USDCNH`
-- `CRYPTO:BTC`
+- `FUT.ES.USD.CME.202609`
 - `FUT:ES:202609:CME`
 - `ES:202609:CME`
 - `FUT:SI:202608:COMEX:5000:SI`

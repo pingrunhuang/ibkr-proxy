@@ -23,11 +23,6 @@ class FakeContract:
             setattr(self, key, value)
 
 
-class FakeStock(FakeContract):
-    def __init__(self, symbol, exchange, currency):
-        super().__init__(symbol, exchange, currency, "STK")
-
-
 class FakeFuture(FakeContract):
     def __init__(
         self,
@@ -47,11 +42,6 @@ class FakeFuture(FakeContract):
 class FakeForex(FakeContract):
     def __init__(self, pair, exchange="IDEALPRO"):
         super().__init__(pair[:3], exchange, pair[3:], "CASH")
-
-
-class FakeCrypto(FakeContract):
-    def __init__(self, symbol, exchange, currency):
-        super().__init__(symbol, exchange, currency, "CRYPTO")
 
 
 class FakeEvent:
@@ -156,10 +146,8 @@ def install_fake_ib_async():
     fake_ib_async.IB = FakeIB
     fake_ib_async.Event = FakeEvent
     fake_ib_async.Contract = FakeContract
-    fake_ib_async.Stock = FakeStock
     fake_ib_async.Future = FakeFuture
     fake_ib_async.Forex = FakeForex
-    fake_ib_async.Crypto = FakeCrypto
     fake_ib_async.MarketOrder = FakeMarketOrder
     fake_ib_async.LimitOrder = FakeLimitOrder
     fake_ib_async.StartupFetch = object
@@ -190,12 +178,6 @@ def proxy():
 
 
 def test_contract_from_symbol_supports_plain_and_dotted_formats(proxy):
-    stock = proxy._contract_from_symbol("STK.AAPL.USD.SMART")
-    assert stock.secType == "STK"
-    assert stock.symbol == "AAPL"
-    assert stock.currency == "USD"
-    assert stock.exchange == "SMART"
-
     forex = proxy._contract_from_symbol("CASH.USD.CNH.IDEALPRO")
     assert forex.secType == "CASH"
     assert forex.symbol == "USD"
@@ -210,17 +192,9 @@ def test_contract_from_symbol_supports_plain_and_dotted_formats(proxy):
     assert future.lastTradeDateOrContractMonth == "202609"
     assert future.localSymbol == ""
 
-    crypto = proxy._contract_from_symbol("CRYPTO.BTC.USD.PAXOS")
-    assert crypto.secType == "CRYPTO"
-    assert crypto.symbol == "BTC"
-    assert crypto.currency == "USD"
-    assert crypto.exchange == "PAXOS"
-
 
 def test_contract_from_symbol_supports_startup_and_legacy_formats(proxy):
-    assert proxy._contract_from_symbol("AAPL").secType == "STK"
     assert proxy._contract_from_symbol("FX:USDCNH").secType == "CASH"
-    assert proxy._contract_from_symbol("CRYPTO:BTC").exchange == "PAXOS"
 
     startup_future = proxy._contract_from_symbol("FUT:ES:202609:CME")
     assert startup_future.secType == "FUT"
@@ -251,6 +225,40 @@ def test_contract_from_symbol_supports_future_disambiguators(proxy):
     assert mini_silver.currency == "USD"
     assert mini_silver.multiplier == "1000"
     assert mini_silver.tradingClass == "SIL"
+
+
+def test_records_from_symbols_builds_cash_and_future_records(proxy):
+    assert proxy._records_from_symbols() == []
+    assert proxy._records_from_symbols([]) == []
+
+    records = proxy._records_from_symbols([
+        "  CASH.USD.CNH.IDEALPRO  ",
+        "FUT:SI:202608:COMEX:5000:SI",
+    ])
+
+    assert [record["request_symbol"] for record in records] == [
+        "CASH.USD.CNH.IDEALPRO",
+        "FUT:SI:202608:COMEX:5000:SI",
+    ]
+    assert records[0]["contract"].secType == "CASH"
+    assert records[0]["contract"].symbol == "USD"
+    assert records[0]["contract"].currency == "CNH"
+    assert records[0]["contract"].exchange == "IDEALPRO"
+    assert records[1]["contract"].secType == "FUT"
+    assert records[1]["contract"].symbol == "SI"
+    assert records[1]["contract"].exchange == "COMEX"
+    assert records[1]["contract"].lastTradeDateOrContractMonth == "202608"
+    assert records[1]["contract"].multiplier == "5000"
+    assert records[1]["contract"].tradingClass == "SI"
+
+
+def test_records_from_symbols_rejects_invalid_symbol_requests(proxy):
+    with pytest.raises(ValueError, match="Invalid symbol request"):
+        proxy._records_from_symbols([""])
+    with pytest.raises(ValueError, match="Invalid symbol request"):
+        proxy._records_from_symbols([None])
+    with pytest.raises(ValueError, match="Unsupported symbol"):
+        proxy._records_from_symbols(["AAPL"])
 
 
 def silver_contract(month, con_id, local_symbol):
@@ -475,7 +483,7 @@ def test_order_ownership_survives_store_restart(tmp_path):
 def test_place_order_rejects_missing_engine_identity(proxy, monkeypatch):
     test_logger = MagicMock()
     monkeypatch.setattr(proxy_module, "logger", test_logger)
-    response = proxy._place_order_from_request({"symbol": "AAPL", "qty": 1})
+    response = proxy._place_order_from_request({"symbol": "FX:USDCNH", "qty": 1})
 
     assert response["status"] == "error"
     assert "strategy_id" in response["message"]
@@ -629,28 +637,28 @@ def test_order_update_data_normalizes_trade(proxy):
         client_order_id="strategy-ref",
         broker_order_id="321",
         client_id="engine-01",
-        strategy_id="StockStrategy",
+        strategy_id="FxStrategy",
         account_id="DU12345",
     )
     trade = types.SimpleNamespace(
-        contract=FakeStock("AAPL", "SMART", "USD"),
+        contract=FakeForex("USDCNH", "IDEALPRO"),
         order=FakeOrder(),
         orderStatus=FakeOrderStatus(),
     )
 
     data = proxy._order_update_data(trade)
 
-    assert data["secType"] == "STK"
-    assert data["symbol"] == "AAPL"
-    assert data["currency"] == "USD"
-    assert data["exchange"] == "SMART"
+    assert data["secType"] == "CASH"
+    assert data["symbol"] == "USD"
+    assert data["currency"] == "CNH"
+    assert data["exchange"] == "IDEALPRO"
     assert data["account"] == "DU12345"
     assert data["order_id"] == 321
     assert data["orderRef"] == "strategy-ref"
     assert data["client_order_id"] == "strategy-ref"
     assert data["broker_order_id"] == "321"
     assert data["client_id"] == "engine-01"
-    assert data["strategy_id"] == "StockStrategy"
+    assert data["strategy_id"] == "FxStrategy"
     assert data["action"] == "BUY"
     assert data["status"] == "Submitted"
     assert data["filled"] == 4
@@ -662,17 +670,16 @@ def test_subscribe_market_data_requests_each_contract(proxy):
     fake_ib = FakeIBForSubscriptions()
     proxy.ib = fake_ib
     contracts = [
-        FakeStock("AAPL", "SMART", "USD"),
+        silver_contract("20260827", 760200615, "SIQ6"),
         FakeForex("USDCNH", "IDEALPRO"),
     ]
-    contracts[0].conId = 1001
     contracts[1].conId = 1002
 
     proxy.subscribe_market_data(contracts)
 
-    assert [c.conId for c in fake_ib.market_data_requests] == [1001, 1002]
+    assert [c.conId for c in fake_ib.market_data_requests] == [760200615, 1002]
     assert fake_ib.market_data_requests[0] is not contracts[0]
-    assert fake_ib.market_data_requests[0].exchange == "SMART"
+    assert fake_ib.market_data_requests[0].exchange == "COMEX"
     assert fake_ib.market_data_requests[1].exchange == "IDEALPRO"
 
 

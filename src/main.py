@@ -25,7 +25,7 @@ async def main():
     parser.add_argument('--client-id', type=int, default=int(os.getenv('IB_CLIENT_ID', 1)), help='IB API client ID')
     parser.add_argument('--zmq-port', type=int, default=int(os.getenv('ZMQ_PUB_PORT', 5555)), help='ZeroMQ PUB port')
     parser.add_argument('--zmq-rep-port', type=int, default=int(os.getenv('ZMQ_REP_PORT', 5556)), help='ZeroMQ REP port for commands')
-    parser.add_argument('--symbols', default=os.getenv('IB_SYMBOLS', 'AAPL,TSLA,SPY'), help='Comma-separated symbols to subscribe to')
+    parser.add_argument('--symbols', default=os.getenv('IB_SYMBOLS', 'CASH.USD.CNH.IDEALPRO'), help='Dot separated for CASH, comma separated for FUT symbols to subscribe to')
     parser.add_argument(
         '--enable-md',
         action=argparse.BooleanOptionalAction,

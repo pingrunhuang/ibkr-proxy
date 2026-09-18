@@ -6,7 +6,7 @@ from datetime import datetime
 import zmq
 import zmq.asyncio
 from loguru import logger
-from ib_async import IB, Event, Contract, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
+from ib_async import IB, Event, Contract, Future, Forex, MarketOrder, LimitOrder, StartupFetch
 from order_ownership import OrderOwnershipStore
 
 
@@ -462,29 +462,27 @@ class IBProxy:
         return contract
 
     def _contract_from_request(self, req):
-        contract_type = req.get('sec_type', 'STK')
+        contract_type = req.get('sec_type')
         symbol = req.get('symbol')
-        exchange = req.get('exchange', 'SMART')
+        exchange = req.get('exchange', '')
         currency = req.get('currency', 'USD')
 
         if not symbol:
             return None
 
-        if contract_type == 'STK':
-            return Stock(symbol, exchange, currency)
         if contract_type == 'FUT':
             contract = Future(
                 symbol=symbol,
                 lastTradeDateOrContractMonth=req.get('expiry'),
-                exchange=exchange,
+                exchange=exchange or 'SMART',
                 currency=currency,
             )
             return self._apply_contract_overrides(contract, req)
-        if contract_type == 'CASH':
-            return Forex(symbol, exchange)
-        if contract_type == 'CRYPTO':
-            return Crypto(symbol, exchange, currency)
-        return None
+        elif contract_type == 'CASH':
+            return Forex(symbol, exchange or 'IDEALPRO')
+        else:
+            logger.debug(f"Unrecognize sec_type: {contract_type}")
+            return None
 
     def _parse_optional_contract_values(self, values):
         parsed = {}
@@ -515,14 +513,6 @@ class IBProxy:
         parts = symbol.split('.')
         if len(parts) >= 4:
             sec_type = parts[0].upper()
-            if sec_type in {'STK', 'CRYPTO'} and len(parts) == 4:
-                req = {
-                    'sec_type': sec_type,
-                    'symbol': parts[1],
-                    'currency': parts[2],
-                    'exchange': parts[3]
-                }
-                return self._contract_from_request(req)
             if sec_type == 'CASH' and len(parts) == 4:
                 return Forex(f"{parts[1]}{parts[2]}", parts[3])
             if sec_type == 'FUT' and len(parts) >= 5:
@@ -538,8 +528,6 @@ class IBProxy:
 
         if symbol.startswith('FX:'):
             return Forex(symbol[3:])
-        if symbol.startswith('CRYPTO:'):
-            return Crypto(symbol[7:], 'PAXOS', 'USD')
         if symbol.startswith('FUT:'):
             fut_parts = symbol.split(':')
             if len(fut_parts) >= 4:
@@ -566,34 +554,27 @@ class IBProxy:
             req.update(self._parse_optional_contract_values(colon_parts[3:]))
             return self._contract_from_request(req)
 
-        return Stock(symbol, 'SMART', 'USD')
+        raise ValueError(
+            f"Unsupported symbol: {symbol}. Expected CASH or FUT "
+            f"(e.g. CASH.USD.CNH.IDEALPRO or FUT:COIL:202612:IPE:1000:COIL)"
+        )
 
-    def _contract_request_records(self, symbols=None, contract_requests=None):
+    def _records_from_symbols(self, symbols=None):
         records = []
         for symbol in symbols or []:
-            if not isinstance(symbol, str) or not symbol.strip():
-                raise ValueError(f"Invalid symbol request: {symbol}")
+            if not isinstance(symbol, str):
+                raise ValueError(f"Invalid symbol request: {symbol}({(symbol)})")
             request_symbol = symbol.strip()
+            if not isinstance(symbol, str) or not request_symbol:
+                raise ValueError(f"Invalid symbol request: {symbol}")
             records.append({
                 'request_symbol': request_symbol,
                 'contract': self._contract_from_symbol(request_symbol),
             })
-
-        for req in contract_requests or []:
-            if not isinstance(req, dict):
-                raise ValueError(f"Invalid contract request: {req}")
-            contract = self._contract_from_request(req)
-            if not contract:
-                raise ValueError(f"Invalid contract request: {req}")
-            request_symbol = req.get('request_symbol') or req.get('symbol_key') or self._symbol_key(contract)
-            records.append({
-                'request_symbol': request_symbol,
-                'contract': contract,
-            })
         return records
 
-    async def qualify_contracts(self, symbols=None, contract_requests=None):
-        records = self._contract_request_records(symbols, contract_requests)
+    async def qualify_contracts(self, symbols=None):
+        records = self._records_from_symbols(symbols)
         if not records:
             logger.info("No IB contracts requested for qualification.")
             return []
@@ -952,11 +933,10 @@ class IBProxy:
 
                     elif action == 'qualify_contracts':
                         symbols = req.get('symbols', [])
-                        contract_requests = req.get('contracts', [])
-                        if not isinstance(symbols, list) or not isinstance(contract_requests, list):
-                            response = {"status": "error", "message": "symbols and contracts must be lists"}
+                        if not isinstance(symbols, list):
+                            response = {"status": "error", "message": "symbols must be a list"}
                         else:
-                            qualified = await self.qualify_contracts(symbols, contract_requests)
+                            qualified = await self.qualify_contracts(symbols)
                             response = {
                                 "status": "success",
                                 "data": [r['metadata'] for r in qualified]
@@ -970,11 +950,10 @@ class IBProxy:
                             }
                         else:
                             symbols = req.get('symbols', [])
-                            contract_requests = req.get('contracts', [])
-                            if not isinstance(symbols, list) or not isinstance(contract_requests, list):
-                                response = {"status": "error", "message": "symbols and contracts must be lists"}
+                            if not isinstance(symbols, list):
+                                response = {"status": "error", "message": "symbols must be a list"}
                             else:
-                                qualified = await self.qualify_contracts(symbols, contract_requests)
+                                qualified = await self.qualify_contracts(symbols)
                                 qualified_contracts = [r['contract'] for r in qualified]
                                 self.subscribe_market_data(qualified_contracts)
                                 response = {
