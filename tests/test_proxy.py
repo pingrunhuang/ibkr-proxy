@@ -9,16 +9,18 @@ import pytest
 
 
 class FakeContract:
-    def __init__(self, symbol="", exchange="", currency="", secType="", lastTradeDateOrContractMonth=""):
+    def __init__(self, symbol="", exchange="", currency="", secType="", lastTradeDateOrContractMonth="", **kwargs):
         self.symbol = symbol
         self.exchange = exchange
         self.currency = currency
         self.secType = secType
         self.lastTradeDateOrContractMonth = lastTradeDateOrContractMonth
-        self.conId = 0
-        self.localSymbol = ""
-        self.multiplier = ""
-        self.tradingClass = ""
+        self.conId = kwargs.get("conId", 0)
+        self.localSymbol = kwargs.get("localSymbol", "")
+        self.multiplier = kwargs.get("multiplier", "")
+        self.tradingClass = kwargs.get("tradingClass", "")
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
 class FakeStock(FakeContract):
@@ -153,6 +155,7 @@ def install_fake_ib_async():
     fake_ib_async = types.ModuleType("ib_async")
     fake_ib_async.IB = FakeIB
     fake_ib_async.Event = FakeEvent
+    fake_ib_async.Contract = FakeContract
     fake_ib_async.Stock = FakeStock
     fake_ib_async.Future = FakeFuture
     fake_ib_async.Forex = FakeForex
@@ -528,7 +531,10 @@ def test_place_order_with_conid_uses_registered_contract(proxy):
         "client_order_id": "silver-1",
     }
     placed_contract, placed_order = fake_ib.placed_orders[0]
-    assert placed_contract is contract
+    assert placed_contract is not contract
+    assert placed_contract.conId == 760200615
+    assert placed_contract.exchange == "COMEX"
+    assert placed_contract.lastTradeDateOrContractMonth == ""
     assert placed_order.action == "BUY"
     assert placed_order.totalQuantity == 1
     assert placed_order.orderType == "LMT"
@@ -537,18 +543,18 @@ def test_place_order_with_conid_uses_registered_contract(proxy):
     assert placed_order.orderRef == "silver-1"
 
 
-def test_place_order_uses_copy_with_normalized_registered_future_expiry(proxy):
-    contract = silver_contract("20260630 19:30:00 GB", 361002937, "COILQ6")
+def test_place_order_uses_conid_only_registered_future(proxy):
+    contract = silver_contract("20261030 19:30:00 GB", 361002955, "COILZ6")
     contract.symbol = "COIL"
     contract.exchange = "IPE"
     contract.multiplier = "1000"
     contract.tradingClass = "COIL"
-    proxy._register_contract(contract, "FUT:COIL:202606:IPE:1000:COIL")
+    proxy._register_contract(contract, "FUT:COIL:202612:IPE:1000:COIL")
     fake_ib = FakeIBForProxyCommands()
     proxy.ib = fake_ib
 
     response = proxy._place_order_from_request({
-        "con_id": 361002937,
+        "con_id": 361002955,
         "client_id": "engine-01",
         "strategy_id": "CoilStrategy",
         "client_order_id": "coil-1",
@@ -558,19 +564,64 @@ def test_place_order_uses_copy_with_normalized_registered_future_expiry(proxy):
         "lmt_price": 80.38,
     })
 
-    assert response == {
-        "status": "success",
-        "order_id": 987,
-        "broker_order_id": "987",
-        "client_order_id": "coil-1",
-    }
+    assert response["status"] == "success"
     placed_contract, placed_order = fake_ib.placed_orders[0]
     assert placed_contract is not contract
-    assert placed_contract.lastTradeDateOrContractMonth == "20260630"
-    assert contract.lastTradeDateOrContractMonth == "20260630 19:30:00 GB"
-    assert placed_contract.conId == 361002937
-    assert placed_contract.localSymbol == "COILQ6"
+    assert placed_contract.conId == 361002955
+    assert placed_contract.exchange == "IPE"
+    assert placed_contract.lastTradeDateOrContractMonth == ""
+    assert placed_contract.symbol == ""
+    assert contract.lastTradeDateOrContractMonth == "20261030 19:30:00 GB"
     assert placed_order.tif == "DAY"
+
+
+def test_place_order_uses_conid_only_when_contract_is_not_registered(proxy):
+    fake_ib = FakeIBForProxyCommands()
+    proxy.ib = fake_ib
+
+    response = proxy._place_order_from_request({
+        "sec_type": "FUT",
+        "symbol": "COIL",
+        "exchange": "IPE",
+        "currency": "USD",
+        "expiry": "20261030 19:30:00 GB",
+        "con_id": 361002955,
+        "multiplier": "1000",
+        "trading_class": "COIL",
+        "local_symbol": "COILZ6",
+        "client_id": "engine-01",
+        "strategy_id": "CoilStrategy",
+        "client_order_id": "coil-z6",
+        "qty": 1,
+        "action_type": "SELL",
+        "order_type": "LMT",
+        "lmt_price": 80.38,
+    })
+
+    assert response["status"] == "success"
+    placed_contract, _placed_order = fake_ib.placed_orders[0]
+    assert placed_contract.conId == 361002955
+    assert placed_contract.exchange == "IPE"
+    assert placed_contract.lastTradeDateOrContractMonth == ""
+    assert placed_contract.localSymbol == ""
+
+
+def test_subscribe_market_data_uses_conid_only_contract(proxy):
+    fake_ib = FakeIBForSubscriptions()
+    proxy.ib = fake_ib
+    contract = silver_contract("20261030 19:30:00 GB", 361002955, "COILZ6")
+    contract.symbol = "COIL"
+    contract.exchange = "IPE"
+
+    proxy.subscribe_market_data([contract])
+
+    requested = fake_ib.market_data_requests[0]
+    assert requested is not contract
+    assert requested.conId == 361002955
+    assert requested.exchange == "IPE"
+    assert requested.lastTradeDateOrContractMonth == ""
+    assert requested.symbol == ""
+    assert contract.lastTradeDateOrContractMonth == "20261030 19:30:00 GB"
 
 
 def test_order_update_data_normalizes_trade(proxy):
@@ -619,7 +670,10 @@ def test_subscribe_market_data_requests_each_contract(proxy):
 
     proxy.subscribe_market_data(contracts)
 
-    assert fake_ib.market_data_requests == contracts
+    assert [c.conId for c in fake_ib.market_data_requests] == [1001, 1002]
+    assert fake_ib.market_data_requests[0] is not contracts[0]
+    assert fake_ib.market_data_requests[0].exchange == "SMART"
+    assert fake_ib.market_data_requests[1].exchange == "IDEALPRO"
 
 
 def test_disabled_market_data_rejects_subscriptions():

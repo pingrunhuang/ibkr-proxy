@@ -1,14 +1,12 @@
 import asyncio
-import copy
 import hashlib
 import json
-import re
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import zmq
 import zmq.asyncio
 from loguru import logger
-from ib_async import IB, Event, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
+from ib_async import IB, Event, Contract, Stock, Future, Forex, Crypto, MarketOrder, LimitOrder, StartupFetch
 from order_ownership import OrderOwnershipStore
 
 
@@ -220,33 +218,20 @@ class IBProxy:
             raise ValueError(f"contract has no conId after qualification: {contract}")
         return f"marketdata.IB.{con_id}"
 
-    def _normalize_order_expiry(self, expiry):
-        if expiry in (None, ''):
-            return expiry
-
-        value = str(expiry)
-        match = re.match(r'^(\d{8}) \d{2}:\d{2}:\d{2} ', value)
-        if match:
-            return match.group(1)
-        return value
-
-    def _contract_for_order(self, contract):
-        if getattr(contract, 'secType', '') != 'FUT':
+    def _contract_for_ib_request(self, contract):
+        con_id = getattr(contract, 'conId', 0)
+        if not con_id:
             return contract
 
-        expiry = getattr(contract, 'lastTradeDateOrContractMonth', '')
-        normalized = self._normalize_order_expiry(expiry)
-        if normalized == expiry:
-            return contract
-
-        order_contract = copy.copy(contract)
-        order_contract.lastTradeDateOrContractMonth = normalized
-        logger.info(
-            "Using normalized futures expiry for IB order "
-            f"conId={getattr(contract, 'conId', '')} "
-            f"from={expiry} to={normalized}"
+        ib_contract = Contract(
+            conId=int(con_id),
+            exchange=getattr(contract, 'exchange', '') or '',
         )
-        return order_contract
+        logger.info(
+            "Using conId-only contract for IB request "
+            f"conId={ib_contract.conId} exchange={ib_contract.exchange}"
+        )
+        return ib_contract
 
     def _contract_metadata(self, contract, request_symbol=None):
         data = self._contract_data(contract)
@@ -458,7 +443,7 @@ class IBProxy:
                 f"conId={metadata['conId']} "
                 f"localSymbol={metadata['localSymbol']}"
             )
-            self.ib.reqMktData(contract)
+            self.ib.reqMktData(self._contract_for_ib_request(contract))
 
     def _apply_contract_overrides(self, contract, values):
         for attr, key in (
@@ -650,16 +635,15 @@ class IBProxy:
             contract_record = self.contracts_by_con_id.get(str(con_id))
             if contract_record:
                 logger.info(f"Using registered IB contract for order conId={con_id}")
-                return self._contract_for_order(contract_record['contract'])
+                return self._contract_for_ib_request(contract_record['contract'])
+            exchange = req.get('exchange') or ''
             logger.warning(
                 "Order requested conId that is not in the local registry; "
-                f"falling back to request contract fields conId={con_id}"
+                f"using conId-only contract conId={con_id} exchange={exchange}"
             )
+            return Contract(conId=int(con_id), exchange=exchange)
 
-        contract = self._contract_from_request(req)
-        if contract:
-            return contract
-        return None
+        return self._contract_from_request(req)
 
     def _order_from_request(self, req):
         qty = float(req.get('qty', 0))

@@ -169,7 +169,7 @@ startup or reconnect; Engine-side `event_id` processing remains idempotent.
 }
 ```
 
-If `place_order` includes `con_id`, the proxy first looks up the qualified contract in its local registry and places the order with that exact contract. This avoids ambiguous futures orders after the engine has qualified and subscribed the contract.
+If `place_order` includes `con_id`, the proxy looks up the qualified contract in its local registry and sends IB a conId-only contract (`conId` plus `exchange`). `subscribe_market_data` does the same after qualification. That keeps ICE Brent last-trade timestamps out of `reqMktData` / `placeOrder` while `.env` symbols stay human-readable.
 
 Supported symbol formats for `subscribe_market_data` include:
 - `AAPL`
