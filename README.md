@@ -122,6 +122,7 @@ uv run src/consumer_example.py
 ```
 
 ## ZeroMQ Topics
+- `status.IB`: Trader-session notices. The JSON object always includes `gateway_name`, `ib_connected`, `md_enabled`, `td_enabled`, and `reason`. Optional `error_code` / `error_message` are added for IB API errors. Optional `status` is a CTP-family session name. It is omitted for a normal connect, reconnect, or connectivity-restored notice. The trading engine reads this field as `data.status`.
 - `marketdata.IB.<conId>`: Streaming tick data keyed by IBKR's unique contract ID.
   - Example: `marketdata.IB.760200615`
   - The payload includes `request_symbol`, `symbol_key`, `conId`, `localSymbol`, `lastTradeDateOrContractMonth`, `multiplier`, and `tradingClass`.
@@ -130,6 +131,37 @@ uv run src/consumer_example.py
 - `executions.<account_id>`: Order fills and trade details.
 - `pnl.<account_id>.account`: Daily PnL for the account.
 - `pnl.<account_id>.<conId>`: Daily PnL for a specific contract.
+
+### `status.IB`
+
+Example when the API socket to TWS/Gateway drops:
+
+```json
+{
+  "gateway_name": "IB",
+  "ib_connected": false,
+  "md_enabled": true,
+  "td_enabled": true,
+  "reason": "Trading connection to TWS/IB Gateway lost",
+  "status": "TD_DISCONNECTED"
+}
+```
+
+`status` uses the same hard-stop names as CTP-family proxies. Market-data farm notices never use a `TD_*` name. The proxy keeps its own reconnect loop; publishing a status does not stop it.
+
+| Condition | `status` |
+| --- | --- |
+| API socket to TWS/Gateway lost after a ready session (`disconnectedEvent`), or IB errors 504 / 1300 | `TD_DISCONNECTED` |
+| IB server connectivity lost while the API socket stays up: 1100 and 2110 | `TD_DISCONNECTED` |
+| `connectAsync` failure, reconnect failure, client id already in use (326), couldn't connect (502), or handshake rejected (503) | `TD_LOGIN_FAILED` |
+| Market-data / HMDS / sec-def farm broken (2103 / 2105 / 2157) | `MD_DISCONNECTED` |
+| Farm OK or inactive (2104 / 2106 / 2107 / 2108 / 2119 / 2158) | field omitted |
+| Connectivity restored (1101 / 1102), successful connect, or successful reconnect | field omitted |
+| Planned proxy shutdown (`stop()`, including the disconnect it triggers) | not published |
+
+1100 means "Connectivity between IB and TWS has been lost" and 2110 means "Connectivity between TWS and server is broken." TWS may keep the API socket open and ib_async treats the whole 2100-2199 band as warnings, but 2110 is not a market-data farm. Both are published as `TD_DISCONNECTED` so a loss of IB server connectivity hard-stops trading the same way a CTP front disconnect does. The proxy does not tear down a still-open socket on those codes; its reconnect loop runs only when `isConnected()` is false. 1101/1102 report that connectivity was restored and are not hard-stop names. An engine that already halted on 1100/2110 will not resume because of them.
+
+This API client does not see TWS/IBC username or password failures, and IB has no settlement-confirm step, so the proxy does not emit `TD_AUTH_FAILED` or `SETTLEMENT_CONFIRM_FAILED`.
 
 ## ZeroMQ Commands
 Send JSON requests to `tcp://<host>:5556`:
@@ -186,4 +218,4 @@ Proxy-side unit tests mock IBKR objects and do not require a live IB Gateway:
 uv run --with pytest pytest tests -q
 ```
 
-These tests validate contract parsing, order payload normalization, and subscription calls. Live IBKR integration checks should be run from the trading engine test suite with the explicit integration flags documented there.
+These tests validate contract parsing, order payload normalization, subscription calls, and `status.IB` session names (trading disconnect, market-data farm warnings, connect/login failure, planned shutdown, and successful connect). Live IBKR integration checks should be run from the trading engine test suite with the explicit integration flags documented there.

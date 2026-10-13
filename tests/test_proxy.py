@@ -693,3 +693,296 @@ def test_disabled_market_data_rejects_subscriptions():
         instance.pub_socket.close(0)
         instance.rep_socket.close(0)
         instance.context.term()
+
+
+class SubscriberEvent:
+    def __init__(self):
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
+def collect_status(proxy):
+    published = []
+
+    async def fake_publish(topic, data):
+        published.append((topic, data))
+
+    proxy.publish = fake_publish
+    return published
+
+
+def hard_stop_names(published):
+    return [
+        data.get("status")
+        for _topic, data in published
+        if data.get("status") in proxy_module.HARD_STOP_SESSION_STATUSES
+    ]
+
+
+def test_ib_error_codes_map_to_session_status_names():
+    status_for = proxy_module.session_status_for_ib_error
+    assert status_for(1100) == "TD_DISCONNECTED"
+    assert status_for(2110) == "TD_DISCONNECTED"
+    assert status_for(504) == "TD_DISCONNECTED"
+    assert status_for(1300) == "TD_DISCONNECTED"
+    assert status_for(326) == "TD_LOGIN_FAILED"
+    assert status_for(502) == "TD_LOGIN_FAILED"
+    assert status_for(503) == "TD_LOGIN_FAILED"
+    for code in (2103, 2105, 2157):
+        assert status_for(code) == "MD_DISCONNECTED"
+    for code in (1101, 1102, 2104, 2106, 2107, 2108, 2119, 2158, 201, 202):
+        assert status_for(code) is None
+    assert proxy_module.session_status_for_ib_error("not-a-code") is None
+
+
+def test_td_disconnect_publishes_td_disconnected(proxy):
+    published = collect_status(proxy)
+    proxy._api_connected = True
+    proxy.ib.isConnected = lambda: False
+
+    async def run():
+        proxy.on_ib_disconnected()
+        proxy.on_ib_disconnected()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert len(published) == 1
+    topic, data = published[0]
+    assert topic == "status.IB"
+    assert data["status"] == "TD_DISCONNECTED"
+    assert data["gateway_name"] == "IB"
+    assert data["ib_connected"] is False
+    assert data["td_enabled"] is True
+    assert "md_enabled" in data
+    assert "Trading connection" in data["reason"]
+    assert proxy._closing is False
+
+
+def test_ib_server_connectivity_loss_is_td_disconnected_while_socket_stays_up(proxy):
+    published = collect_status(proxy)
+    proxy._api_connected = True
+    proxy._is_running = True
+    proxy.ib.isConnected = lambda: True
+
+    async def run():
+        proxy.on_ib_error(
+            -1,
+            1100,
+            "Connectivity between IB and TWS has been lost.",
+            None,
+        )
+        proxy.on_ib_error(
+            -1,
+            2110,
+            "Connectivity between TWS and server is broken. It will be restored automatically.",
+            None,
+        )
+        proxy.on_ib_error(
+            -1,
+            1102,
+            "Connectivity between IB and TWS has been restored - data maintained.",
+            None,
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert [data["status"] for _topic, data in published[:2]] == [
+        "TD_DISCONNECTED",
+        "TD_DISCONNECTED",
+    ]
+    assert all(data["ib_connected"] is True for _topic, data in published[:2])
+    assert all(data["error_code"] in (1100, 2110) for _topic, data in published[:2])
+    restored = published[2][1]
+    assert "status" not in restored
+    assert restored["error_code"] == 1102
+    assert proxy._api_connected is True
+    assert proxy._is_running is True
+
+
+def test_market_data_farm_warnings_do_not_use_td_status(proxy):
+    published = collect_status(proxy)
+
+    async def run():
+        proxy.on_ib_error(-1, 2103, "Market data farm connection is broken:hfarm", None)
+        proxy.on_ib_error(-1, 2105, "HMDS data farm connection is broken:hfarm", None)
+        proxy.on_ib_error(-1, 2157, "Sec-def data farm connection is broken:secdef", None)
+        proxy.on_ib_error(-1, 2104, "Market data farm connection is OK:hfarm", None)
+        proxy.on_ib_error(-1, 201, "Order rejected", None)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert [data.get("status") for _topic, data in published] == [
+        "MD_DISCONNECTED",
+        "MD_DISCONNECTED",
+        "MD_DISCONNECTED",
+        None,
+    ]
+    assert hard_stop_names(published) == []
+    assert all(not str(data.get("status", "")).startswith("TD_") for _topic, data in published)
+    assert published[3][1]["error_code"] == 2104
+
+
+def test_connect_and_client_id_failures_publish_td_login_failed(proxy):
+    published = collect_status(proxy)
+    proxy._bind_zmq = lambda: None
+    proxy.setup_event_handlers = lambda: None
+    proxy.ib.disconnectedEvent = SubscriberEvent()
+    proxy.ib.errorEvent = SubscriberEvent()
+
+    async def refuse(*_args, **_kwargs):
+        raise ConnectionRefusedError("Couldn't connect to TWS")
+
+    async def run_connect():
+        proxy.ib.connectAsync = refuse
+        with pytest.raises(ConnectionRefusedError):
+            await proxy.connect()
+        proxy.on_ib_error(
+            -1,
+            326,
+            "Unable to connect as the client id is already in use. Retry with a unique client id.",
+            None,
+        )
+        proxy.on_ib_error(-1, 502, "Couldn't connect to TWS.", None)
+        await asyncio.sleep(0)
+
+    asyncio.run(run_connect())
+
+    statuses = [data.get("status") for _topic, data in published]
+    assert statuses == ["TD_LOGIN_FAILED", "TD_LOGIN_FAILED", "TD_LOGIN_FAILED"]
+    assert all(topic == "status.IB" for topic, _data in published)
+    assert published[1][1]["error_code"] == 326
+    assert "client id" in published[1][1]["reason"]
+    assert "gateway_name" in published[0][1]
+    assert "ib_connected" in published[0][1]
+    assert "reason" in published[0][1]
+
+
+def test_successful_connect_does_not_publish_hard_stop_status(proxy):
+    published = collect_status(proxy)
+    proxy._bind_zmq = lambda: None
+    proxy.setup_event_handlers = lambda: None
+    proxy.ib.disconnectedEvent = SubscriberEvent()
+    proxy.ib.errorEvent = SubscriberEvent()
+    proxy.ib.isConnected = lambda: True
+
+    async def connect_ok(*_args, **_kwargs):
+        return None
+
+    async def run_connect():
+        proxy.ib.connectAsync = connect_ok
+        await proxy.connect()
+
+    asyncio.run(run_connect())
+
+    assert published
+    assert hard_stop_names(published) == []
+    topic, data = published[-1]
+    assert topic == "status.IB"
+    assert "status" not in data
+    assert data["gateway_name"] == "IB"
+    assert data["ib_connected"] is True
+    assert data["td_enabled"] is True
+    assert data["reason"] == "Successfully connected to IB Gateway."
+    assert proxy._api_connected is True
+
+
+def test_planned_shutdown_does_not_publish_hard_stop_status():
+    instance = proxy_module.IBProxy()
+    published = collect_status(instance)
+    instance._api_connected = True
+    instance._is_running = True
+
+    def disconnect():
+        instance.on_ib_disconnected()
+        instance.on_ib_error(-1, 1100, "Connectivity between IB and TWS has been lost.", None)
+        instance.on_ib_error(-1, 504, "Not connected", None)
+        instance.on_ib_error(-1, 326, "client id is already in use", None)
+
+    instance.ib.disconnect = disconnect
+
+    async def run_stop():
+        instance.stop()
+        await instance.publish_session_status(
+            reason="late disconnect",
+            session_status="TD_DISCONNECTED",
+        )
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(run_stop())
+    finally:
+        if not instance._stopped:
+            instance.order_ownership.close()
+            instance.pub_socket.close(0)
+            instance.rep_socket.close(0)
+            instance.context.term()
+
+    assert instance._closing is True
+    assert published == []
+    assert hard_stop_names(published) == []
+
+
+def test_reconnect_loop_continues_after_td_disconnect(proxy, monkeypatch):
+    published = collect_status(proxy)
+    proxy._is_running = True
+    proxy._api_connected = True
+    attempts = []
+    state = {"up": False}
+
+    def is_connected():
+        return state["up"]
+
+    async def connect_async(*_args, **_kwargs):
+        attempts.append("connect")
+        state["up"] = True
+
+    async def stop_after_sleep(_delay):
+        proxy._is_running = False
+
+    proxy.ib.isConnected = is_connected
+    proxy.ib.connectAsync = connect_async
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", stop_after_sleep)
+
+    async def run():
+        proxy.on_ib_disconnected()
+        await proxy._connection_monitor()
+
+    asyncio.run(run())
+
+    assert attempts == ["connect"]
+    assert proxy._closing is False
+    assert any(data.get("status") == "TD_DISCONNECTED" for _topic, data in published)
+    assert any(
+        "status" not in data and "Reconnected" in data["reason"]
+        for _topic, data in published
+    )
+    assert proxy._api_connected is True
+
+
+def test_failed_reconnect_publishes_td_login_failed_and_retries(proxy, monkeypatch):
+    published = collect_status(proxy)
+    proxy._is_running = True
+    attempts = []
+
+    async def connect_async(*_args, **_kwargs):
+        attempts.append("connect")
+        raise ConnectionError("Couldn't connect to TWS")
+
+    async def stop_after_sleep(_delay):
+        proxy._is_running = False
+
+    proxy.ib.isConnected = lambda: False
+    proxy.ib.connectAsync = connect_async
+    monkeypatch.setattr(proxy_module.asyncio, "sleep", stop_after_sleep)
+
+    asyncio.run(proxy._connection_monitor())
+
+    assert attempts == ["connect"]
+    assert proxy._closing is False
+    assert [data.get("status") for _topic, data in published] == ["TD_LOGIN_FAILED"]
