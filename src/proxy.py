@@ -61,6 +61,100 @@ def _trade_event_id(
     return f"trade:{gateway_name.lower()}:{hashlib.sha256(encoded).hexdigest()}"
 
 
+# ZMQ topic for trader-session notices. The JSON object is the status payload;
+# ``status`` is optional and, when set to a CTP-family hard-stop name, is what
+# multi-market-trading-engine reads as ``data.status``.
+STATUS_TOPIC = "status.IB"
+
+TD_DISCONNECTED = "TD_DISCONNECTED"
+TD_AUTH_FAILED = "TD_AUTH_FAILED"
+TD_LOGIN_FAILED = "TD_LOGIN_FAILED"
+SETTLEMENT_CONFIRM_FAILED = "SETTLEMENT_CONFIRM_FAILED"
+MD_DISCONNECTED = "MD_DISCONNECTED"
+
+HARD_STOP_SESSION_STATUSES = frozenset({
+    TD_DISCONNECTED,
+    TD_AUTH_FAILED,
+    TD_LOGIN_FAILED,
+    SETTLEMENT_CONFIRM_FAILED,
+})
+
+# Trading connection to TWS/Gateway is gone, or TWS lost IB server connectivity
+# while the API socket itself may still be up (1100, 2110).
+TD_DISCONNECTED_ERROR_CODES = frozenset({
+    504,   # Not connected
+    1100,  # Connectivity between IB and TWS has been lost
+    1300,  # Socket port reset; this connection is being dropped
+    2110,  # Connectivity between TWS and server is broken
+})
+
+# Connect/handshake failures. IB username/password login belongs to TWS/IBC,
+# not this API client, so these are login failures rather than TD_AUTH_FAILED.
+TD_LOGIN_FAILED_ERROR_CODES = frozenset({
+    326,  # Client id is already in use
+    502,  # Couldn't connect to TWS
+    503,  # TWS/Gateway is out of date (handshake rejected)
+})
+
+# Market-data, historical, and security-definition farm warnings. Never TD_*.
+MD_FARM_BROKEN_ERROR_CODES = frozenset({
+    2103,  # Market data farm connection is broken
+    2105,  # HMDS data farm connection is broken
+    2157,  # Sec-def data farm connection is broken
+})
+
+MD_FARM_INFORMATIONAL_ERROR_CODES = frozenset({
+    2104,  # Market data farm connection is OK
+    2106,  # HMDS data farm connection is OK
+    2107,  # HMDS data farm connection is inactive
+    2108,  # Market data farm connection is inactive
+    2119,  # Market data farm is connecting
+    2158,  # Sec-def data farm connection is OK
+})
+
+# IB server connectivity restored. Not a hard-stop; the engine will already
+# have halted if 1100/2110 was published.
+CONNECTIVITY_RESTORED_ERROR_CODES = frozenset({
+    1101,  # Connectivity restored; data lost
+    1102,  # Connectivity restored; data maintained
+})
+
+
+def _error_code(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def session_status_for_ib_error(error_code):
+    """Map an IB API error code to a session status name, or None.
+
+    2110 sits in ib_async's 2100-2199 warning band, but it reports loss of
+    connectivity between TWS and the IB server, not a market-data farm.
+    Farm codes stay on MD_* so the engine does not hard-stop trading.
+    """
+    code = _error_code(error_code)
+    if code is None:
+        return None
+    if code in TD_DISCONNECTED_ERROR_CODES:
+        return TD_DISCONNECTED
+    if code in TD_LOGIN_FAILED_ERROR_CODES:
+        return TD_LOGIN_FAILED
+    if code in MD_FARM_BROKEN_ERROR_CODES:
+        return MD_DISCONNECTED
+    return None
+
+
+def ib_error_is_session_notice(error_code):
+    code = _error_code(error_code)
+    if code is None:
+        return False
+    if session_status_for_ib_error(code):
+        return True
+    return code in MD_FARM_INFORMATIONAL_ERROR_CODES or code in CONNECTIVITY_RESTORED_ERROR_CODES
+
+
 class IBProxy:
     def __init__(
         self,
@@ -90,6 +184,12 @@ class IBProxy:
         
         # Internal state
         self._is_running = False
+        self._closing = False
+        self._stopped = False
+        self._zmq_bound = False
+        self._connection_handlers_registered = False
+        self._api_connected = False
+        self._disconnect_announced = False
         self.contracts_by_con_id = {}
         self.contracts_by_symbol_key = {}
         self.request_symbol_to_con_id = {}
@@ -107,8 +207,40 @@ class IBProxy:
             self.ib.positionEndEvent.emit()
         self.ib.wrapper.positionEnd = position_end_hook
 
+    def _bind_zmq(self):
+        """Bind PUB/REP once so session status can be published before IB login."""
+        if self._zmq_bound:
+            return
+        logger.info(f"Binding ZeroMQ PUB socket to tcp://*:{self.zmq_port}...")
+        self.pub_socket.bind(f"tcp://*:{self.zmq_port}")
+        logger.info(f"Binding ZeroMQ REP socket to tcp://*:{self.zmq_rep_port}...")
+        self.rep_socket.bind(f"tcp://*:{self.zmq_rep_port}")
+        self._zmq_bound = True
+
+    def _register_connection_handlers(self):
+        """Listen for IB disconnects and error codes before connectAsync runs."""
+        if self._connection_handlers_registered:
+            return
+        disconnected = getattr(self.ib, "disconnectedEvent", None)
+        error = getattr(self.ib, "errorEvent", None)
+        if disconnected is None or error is None:
+            logger.warning(
+                "IB disconnectedEvent/errorEvent unavailable; "
+                "trader session status is limited to connect failures"
+            )
+            return
+        disconnected += self.on_ib_disconnected
+        error += self.on_ib_error
+        self._connection_handlers_registered = True
+
+    def _mark_api_connected(self):
+        self._api_connected = True
+        self._disconnect_announced = False
+
     async def connect(self):
         """Connect to IB Gateway and bind ZeroMQ socket."""
+        self._bind_zmq()
+        self._register_connection_handlers()
         logger.info(f"Connecting to IB Gateway at {self.ib_host}:{self.ib_port}...")
         try:
             await self.ib.connectAsync(
@@ -119,19 +251,24 @@ class IBProxy:
             logger.info("Successfully connected to IB Gateway.")
         except Exception as e:
             logger.error(f"Failed to connect to IB Gateway: {e}")
+            if not self._closing:
+                await self.publish_session_status(
+                    reason=f"Failed to connect to IB Gateway: {e}",
+                    session_status=TD_LOGIN_FAILED,
+                    error_message=str(e),
+                )
             raise
 
-        logger.info(f"Binding ZeroMQ PUB socket to tcp://*:{self.zmq_port}...")
-        self.pub_socket.bind(f"tcp://*:{self.zmq_port}")
-        
-        logger.info(f"Binding ZeroMQ REP socket to tcp://*:{self.zmq_rep_port}...")
-        self.rep_socket.bind(f"tcp://*:{self.zmq_rep_port}")
-        
+        self._mark_api_connected()
         # Register event handlers
         self.setup_event_handlers()
+        await self.publish_session_status(
+            reason="Successfully connected to IB Gateway.",
+        )
 
     def setup_event_handlers(self):
         """Setup IB event handlers for various data types."""
+        self._register_connection_handlers()
         if self.enable_md:
             self.ib.pendingTickersEvent += self.on_pending_tickers
         self.ib.accountValueEvent += self.on_account_value
@@ -819,6 +956,105 @@ class IBProxy:
             for contract in contracts:
                 self.ib.reqPnLSingle(account, "", contract.conId)
 
+    def on_ib_disconnected(self):
+        """API socket to TWS/Gateway dropped.
+
+        ib_async emits this for both peer loss and IB.disconnect(). A planned
+        proxy shutdown must not publish TD_* or the engine will hard-stop.
+        A second emit for the same drop is ignored so it cannot be relabeled
+        as TD_LOGIN_FAILED.
+        """
+        if self._closing:
+            logger.info(
+                "IB disconnect during planned proxy shutdown; "
+                "not publishing a hard-stop status"
+            )
+            return
+        if self._api_connected:
+            self._api_connected = False
+            self._disconnect_announced = True
+            self._schedule_session_status(
+                reason="Trading connection to TWS/IB Gateway lost",
+                session_status=TD_DISCONNECTED,
+            )
+            return
+        if self._disconnect_announced:
+            return
+        self._disconnect_announced = True
+        self._schedule_session_status(
+            reason="IB API disconnected before the trading session was ready",
+            session_status=TD_LOGIN_FAILED,
+        )
+
+    def on_ib_error(self, reqId, errorCode, errorString, contract=None):
+        """Publish trader-session status for connection and farm notices.
+
+        Order rejects and other request errors are ignored. Market-data farm
+        warnings never use TD_* names. 1100/2110 are TD_DISCONNECTED even
+        when the API socket stays up.
+        """
+        del reqId, contract
+        if not ib_error_is_session_notice(errorCode):
+            return
+        if self._closing:
+            logger.info(
+                "IB error {} during planned proxy shutdown; "
+                "not publishing a hard-stop status",
+                errorCode,
+            )
+            return
+        session_status = session_status_for_ib_error(errorCode)
+        message = _text(errorString) or f"IB error {errorCode}"
+        self._schedule_session_status(
+            reason=message,
+            session_status=session_status,
+            error_code=_error_code(errorCode),
+            error_message=message,
+        )
+
+    def _schedule_session_status(self, **kwargs):
+        asyncio.create_task(self.publish_session_status(**kwargs))
+
+    async def publish_session_status(
+        self,
+        *,
+        reason,
+        session_status=None,
+        error_code=None,
+        error_message=None,
+    ):
+        """Publish ``status.IB``.
+
+        Existing connection fields are always present. ``status`` is omitted
+        unless this notice has a session name. Hard-stop names are suppressed
+        once a planned shutdown has started.
+        """
+        if self._closing and session_status in HARD_STOP_SESSION_STATUSES:
+            logger.info(
+                "Skip hard-stop status {} during planned proxy shutdown: {}",
+                session_status,
+                reason,
+            )
+            return
+        try:
+            ib_connected = bool(self.ib.isConnected())
+        except Exception:
+            ib_connected = False
+        payload = {
+            "gateway_name": "IB",
+            "ib_connected": ib_connected,
+            "md_enabled": self.enable_md,
+            "td_enabled": True,
+            "reason": reason,
+        }
+        if error_code is not None:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        if session_status:
+            payload["status"] = session_status
+        await self.publish(STATUS_TOPIC, payload)
+
     async def publish(self, topic, data):
         """Publish data to ZeroMQ."""
         message = json.dumps(data, default=str)
@@ -980,8 +1216,13 @@ class IBProxy:
         )
 
     async def _connection_monitor(self):
-        """Monitor IB connection and attempt reconnection."""
-        while self._is_running:
+        """Monitor IB connection and attempt reconnection.
+
+        Publishing TD_* does not stop this loop. Planned shutdown sets
+        ``_closing`` first so a disconnect from ``stop()`` is not reported
+        as a trading-session failure.
+        """
+        while self._is_running and not self._closing:
             if not self.ib.isConnected():
                 logger.warning("IB connection lost. Attempting to reconnect...")
                 try:
@@ -990,18 +1231,42 @@ class IBProxy:
                         clientId=self.client_id, 
                         timeout=15
                     )
+                    if self._closing or not self._is_running:
+                        break
+                    self._mark_api_connected()
                     logger.info("Reconnected to IB Gateway.")
+                    await self.publish_session_status(
+                        reason="Reconnected to IB Gateway.",
+                    )
                 except Exception as e:
                     logger.error(f"Reconnection failed: {e}. Retrying in 5 seconds...")
+                    if self._closing or not self._is_running:
+                        break
+                    await self.publish_session_status(
+                        reason=f"Reconnection failed: {e}",
+                        session_status=TD_LOGIN_FAILED,
+                        error_message=str(e),
+                    )
                     await asyncio.sleep(5)
                     continue
             
             await asyncio.sleep(1)
 
     def stop(self):
-        """Stop the proxy."""
+        """Stop the proxy.
+
+        ``_closing`` is set before ``ib.disconnect()`` so the disconnect
+        callback cannot publish TD_DISCONNECTED for an intentional shutdown.
+        """
+        if self._stopped:
+            return
+        self._closing = True
         self._is_running = False
-        self.ib.disconnect()
+        self._stopped = True
+        try:
+            self.ib.disconnect()
+        except Exception:
+            logger.exception("Failed to disconnect IB during proxy shutdown")
         self.pub_socket.close()
         self.rep_socket.close()
         self.context.term()
